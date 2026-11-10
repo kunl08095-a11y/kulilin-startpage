@@ -332,8 +332,15 @@
                 height .3s cubic-bezier(.22, .8, .3, 1),
                 background-color .24s ease,
                 border-radius .3s cubic-bezier(.22, .8, .3, 1),
-                box-shadow .24s ease,
-                transform .18s ease-out;
+                box-shadow .24s ease;
+  }
+
+  /* 出现/收回时横线宽度逐帧跟着图标排走，关掉宽度过渡，避免和阻尼打架 */
+  .dock-wrap.revealing .dock-handle {
+    transition: height .3s cubic-bezier(.22, .8, .3, 1),
+                background-color .24s ease,
+                border-radius .3s cubic-bezier(.22, .8, .3, 1),
+                box-shadow .24s ease;
   }
 
   .dock-wrap.editing .dock-handle {
@@ -386,7 +393,6 @@
 
   .dock {
     --pop: 14px;     /* 放大时整排抬起，避免图标底部压到横线 */
-    --pop-t: .16s;   /* 抬起/落回的过渡时长，默认平滑，按下时变快 */
     position: absolute;
     top: 50%;
     left: 50%;
@@ -401,13 +407,13 @@
     /* 图标从横线中心长出来：位置、缩放、透明都由 JS 每帧驱动 */
     transform: translateX(-50%)
       translateY(calc((34px * (1 - var(--reveal, 0))) - var(--pop) * var(--lift)));
-    transition: transform var(--pop-t) ease, opacity .18s ease, visibility 0s .6s;
+    transition: opacity .18s ease, visibility 0s .6s;
   }
 
   .dock-wrap.open .dock {
     visibility: visible;
     pointer-events: auto;
-    transition: transform var(--pop-t) ease, opacity .18s ease, visibility 0s;
+    transition: opacity .18s ease, visibility 0s;
   }
 
   .dock-items {

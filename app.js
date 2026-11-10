@@ -255,8 +255,11 @@
   var magTargetY = null;
   var magX = null;
   var magY = null;
+  var liftNow = 0;          // 放大抬起量，带阻尼，0~1
+  var liftTarget = 0;
   var MAG_DAMP = 0.18;      // 每帧向鼠标追 18%，放大中心因此有减速感
   var P_DAMP = 0.16;        // 接近度同样阻尼推进，靠近/离开都不会硬切
+  var LIFT_DAMP = 0.12;     // 抬起/落回也走阻尼，不跟二值开关硬切
   var dockGap = 6;
   var REDUCE_MOTION = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
 
@@ -683,11 +686,11 @@
     startDockTick();
   }
 
-  /** 点横线时立即展开，保证 focus() 时元素已经可见 */
+  /** 点横线时展开；可见性先打开，尺寸仍交给阻尼循环推进 */
   function revealNow() {
     pTarget = 1;
-    pNow = 1;
     setDockOpen(true);
+    startDockTick();
     layoutDock();
   }
 
@@ -722,6 +725,8 @@
       magX = magTargetX;
       magY = magTargetY;
       layoutDock();
+      liftNow = liftTarget;
+      dockWrap.style.setProperty("--lift", liftNow.toFixed(3));
       return;
     }
 
@@ -758,6 +763,16 @@
 
     layoutDock();
 
+    // 抬起量也要阻尼：放大让位时慢慢抬起，鼠标移开后慢慢落回
+    var dl = liftTarget - liftNow;
+    if (Math.abs(dl) > 0.002) {
+      liftNow += dl * LIFT_DAMP;
+      moving = true;
+    } else {
+      liftNow = liftTarget;
+    }
+    dockWrap.style.setProperty("--lift", liftNow.toFixed(3));
+
     if (moving) dockTickRaf = requestAnimationFrame(dockTick);
   }
 
@@ -774,9 +789,12 @@
 
     dockWrap.style.setProperty("--sink", sunk.toFixed(3));
     dockWrap.style.setProperty("--reveal", e.toFixed(3));
+    // 出现/收回过程中让横线宽度逐帧跟住图标排，别被 CSS 过渡拖出偏差
+    dockWrap.classList.toggle("revealing", pNow > 0.0001 && pNow < 0.995);
 
     lineGrow = e;
-    setDockOpen(pNow >= ICON_FROM);
+    // 点线展开时先钉住，避免 pNow 还没到阈值就把刚打开的 dock 又关回去
+    setDockOpen(pNow >= ICON_FROM || dockPinned);
 
     // 拖动时图标位置由拖动逻辑接管；编辑时 dock 本身隐藏
     if (dragState || dockWrap.classList.contains("editing")) {
@@ -847,7 +865,8 @@
       x += rest[c].width * scale + gap;
     }
 
-    dockWrap.style.setProperty("--lift", e > 0.85 && span > restTotal + 0.5 ? "1" : "0");
+    liftTarget = e > 0.85 && span > restTotal + 0.5 ? 1 : 0;
+    dockWrap.style.setProperty("--lift", liftNow.toFixed(3));
   }
 
   /** 鼠标离横线上下 160px 内、左右端点外 160px 内都算“接近” */
@@ -1082,6 +1101,8 @@
     magTargetY = null;
     magX = null;
     magY = null;
+    liftNow = 0;
+    liftTarget = 0;
     dockWrap.style.setProperty("--lift", "0");
   }
 

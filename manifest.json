@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KULILIN 起始页",
-  "version": "1.6.4",
+  "version": "1.6.5",
   "description": "极简新标签页：KULILIN 搜索。",
   "permissions": ["storage"],
   "chrome_url_overrides": {
