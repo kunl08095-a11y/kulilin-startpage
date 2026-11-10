@@ -185,15 +185,9 @@
 
   /**
    * 像网址就直接打开，否则用当前搜索引擎搜索。
+   * 判断规则放在 url.js，浏览器和 Node 共用，方便单独测。
    */
-  function asUrl(value) {
-    if (/\s/.test(value)) return null;
-    if (/^https?:\/\/\S+$/i.test(value)) return value;
-    if (/^localhost(:\d+)?(\/\S*)?$/i.test(value)) return "http://" + value;
-    if (/^(\d{1,3}\.){3}\d{1,3}(:\d+)?(\/\S*)?$/.test(value)) return "http://" + value;
-    if (/^[\w-]+(\.[\w-]+)*\.[a-z]{2,}(:\d+)?(\/\S*)?$/i.test(value)) return "https://" + value;
-    return null;
-  }
+  var asUrl = window.KulilinUrl.asUrl;
 
   function go(newTab) {
     var value = q.value.trim();
@@ -240,12 +234,28 @@
   var dockForm = document.getElementById("dockAddForm");
   var dockUrl = document.getElementById("dockUrl");
   var dockNote = document.getElementById("dockNote");
-  var DOCK_HINT = "回车添加 · 右键图标可移除";
+  var DOCK_HINT = "回车添加 · 拖动排序，拖出移除";
 
   var sites = loadSites();
   var dockIsOpen = false;
   var magRaf = 0;
   var magX = null;
+
+  var dragState = null;
+  var suppressClick = false;
+  var DRAG_START = 6;   // 移动超过这个距离才算拖动
+  var DROP_OUT = 56;    // 拖到 dock 上下方这个距离外松手 = 移除
+  var DROP_EDGE = 72;   // 左右同理
+
+  var REVEAL_RADIUS = 64;
+  var TOAST_MS = 6000;
+
+  var toast = document.getElementById("toast");
+  var toastText = document.getElementById("toastText");
+  var toastAction = document.getElementById("toastAction");
+  var toastHideTimer = 0;
+  var toastRemoveTimer = 0;
+  var pendingUndo = null;
 
   function loadSites() {
     try {
@@ -284,6 +294,7 @@
       link.className = "dock-item";
       link.href = url;
       link.title = siteName(url);
+      link.draggable = false;
 
       var img = document.createElement("img");
       img.alt = "";
@@ -386,6 +397,181 @@
     }
   }
 
+  /* ---------- 拖动排序 / 拖出移除 ---------- */
+
+  function moveSite(from, to) {
+    if (from === to) return;
+    if (from < 0 || to < 0 || from >= sites.length || to >= sites.length) return;
+
+    var item = sites.splice(from, 1)[0];
+    sites.splice(to, 0, item);
+    saveSites();
+
+    // 直接搬 DOM 节点，避免重新渲染让图标闪一下
+    var slots = useDockSlots();
+    var node = slots[from];
+    if (from < to) dockItemsEl.insertBefore(node, slots[to].nextSibling);
+    else dockItemsEl.insertBefore(node, slots[to]);
+
+    var ordered = useDockSlots();
+    for (var i = 0; i < ordered.length; i++) ordered[i].style.setProperty("--i", i);
+    dockAdd.style.setProperty("--i", sites.length);
+    sizeHandle();
+  }
+
+  function useDockSlots() {
+    return Array.prototype.slice.call(dockItemsEl.children);
+  }
+
+  function beginDrag() {
+    var slots = useDockSlots();
+    var rect = dock.getBoundingClientRect();
+
+    dragState.rect = rect;
+    dragState.centers = slots.map(function (slot) {
+      return rect.left + slot.offsetLeft + slot.offsetWidth / 2;
+    });
+    dragState.pitch = slots.length > 1
+      ? dragState.centers[1] - dragState.centers[0]
+      : slots[0].offsetWidth + 6;
+    dragState.target = dragState.index;
+    dragState.started = true;
+
+    suppressClick = true;
+    resetMagnify();
+    dragState.slot.classList.add("dragging");
+    dockItemsEl.classList.add("reordering");
+  }
+
+  function dragTarget(x) {
+    var best = dragState.index;
+    var bestDist = Infinity;
+    for (var i = 0; i < dragState.centers.length; i++) {
+      var dist = Math.abs(dragState.centers[i] - x);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  function dragOutside(x, y) {
+    var r = dragState.rect;
+    return y < r.top - DROP_OUT || y > r.bottom + DROP_OUT ||
+      x < r.left - DROP_EDGE || x > r.right + DROP_EDGE;
+  }
+
+  /** 其他图标让出位置，形成要落下的空档 */
+  function applyDragShift() {
+    var slots = useDockSlots();
+    var from = dragState.index;
+    var to = dragState.target;
+
+    for (var i = 0; i < slots.length; i++) {
+      if (i === from) continue;
+      var shift = 0;
+      if (from < to && i > from && i <= to) shift = -dragState.pitch;
+      else if (to < from && i >= to && i < from) shift = dragState.pitch;
+      slots[i].style.transform = shift ? "translateX(" + shift + "px)" : "";
+    }
+  }
+
+  function finishDrag(action) {
+    if (!dragState) return;
+
+    var state = dragState;
+    dragState = null;
+
+    try { state.link.releasePointerCapture(state.pointerId); } catch (e) {}
+
+    state.slot.classList.remove("dragging", "outside");
+    dockItemsEl.classList.remove("reordering");
+
+    var slots = useDockSlots();
+    for (var i = 0; i < slots.length; i++) slots[i].style.transform = "";
+
+    if (!state.started) return;
+
+    if (action === "remove") {
+      removeSite(state.index);
+    } else if (action === "drop" && state.target !== state.index) {
+      moveSite(state.index, state.target);
+      var moved = dockItemsEl.children[state.target];
+      if (moved) moved.querySelector(".dock-item").focus({ preventScroll: true });
+    } else if (action === "drop") {
+      try { state.link.focus({ preventScroll: true }); } catch (e) {}
+    }
+  }
+
+  dockItemsEl.addEventListener("pointerdown", function (e) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    var link = e.target.closest(".dock-item");
+    if (!link) return;
+
+    suppressClick = false;
+    dragState = {
+      link: link,
+      slot: link.parentNode,
+      index: Array.prototype.indexOf.call(dockItemsEl.children, link.parentNode),
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      threshold: e.pointerType === "touch" ? 10 : DRAG_START,
+      target: 0,
+      started: false,
+      outside: false,
+      centers: [],
+      pitch: 0,
+      rect: null
+    };
+
+    try { link.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+
+  dockItemsEl.addEventListener("pointermove", function (e) {
+    if (!dragState || e.pointerId !== dragState.pointerId) return;
+
+    var dx = e.clientX - dragState.startX;
+    var dy = e.clientY - dragState.startY;
+
+    if (!dragState.started) {
+      if (dx * dx + dy * dy < dragState.threshold * dragState.threshold) return;
+      beginDrag();
+    }
+
+    dragState.outside = dragOutside(e.clientX, e.clientY);
+    dragState.target = dragTarget(e.clientX);
+
+    var scale = dragState.outside ? 0.86 : 1.12;
+    dragState.slot.style.transform =
+      "translate3d(" + dx + "px," + dy + "px,0) scale(" + scale + ")";
+    dragState.slot.classList.toggle("outside", dragState.outside);
+    applyDragShift();
+  });
+
+  dockItemsEl.addEventListener("pointerup", function (e) {
+    if (!dragState || e.pointerId !== dragState.pointerId) return;
+    var action = "drop";
+    if (dragState.started && dragOutside(e.clientX, e.clientY)) action = "remove";
+    finishDrag(action);
+  });
+
+  dockItemsEl.addEventListener("pointercancel", function (e) {
+    if (!dragState || e.pointerId !== dragState.pointerId) return;
+    finishDrag("cancel");
+  });
+
+  dock.addEventListener("dragstart", function (e) { e.preventDefault(); });
+
+  // 拖动结束后浏览器还会补一个 click，别让它把图标打开
+  dockItemsEl.addEventListener("click", function (e) {
+    if (!suppressClick) return;
+    suppressClick = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
+
   var dockPinned = false;
   var proximityRaf = 0;
   var pointerX = null;
@@ -395,7 +581,7 @@
     var p = Math.max(0, Math.min(1, progress));
     dockWrap.style.setProperty("--reveal", p.toFixed(3));
 
-    var open = p >= 0.8;
+    var open = p >= 0.8; // 距横条约 13px 以内完全展开
     if (open === dockIsOpen) return;
 
     dockIsOpen = open;
@@ -418,13 +604,13 @@
     var dx = Math.max(0, Math.abs(x - centerX) - rect.width / 2);
     var dy = y < top ? top - y : (y > bottom ? y - bottom : 0);
     var distance = Math.sqrt(dx * dx + dy * dy);
-    return Math.max(0, 1 - distance / 40);
+    return Math.max(0, 1 - distance / REVEAL_RADIUS);
   }
 
   function updateProximity() {
     proximityRaf = 0;
 
-    if (dockPinned || dockWrap.classList.contains("editing")) {
+    if (dragState || dockPinned || dockWrap.classList.contains("editing")) {
       applyReveal(1);
       return;
     }
@@ -500,11 +686,64 @@
     dockAdd.focus({ preventScroll: true });
   });
 
+  /* ---------- 撤销提示 ---------- */
+
+  function hideToast() {
+    clearTimeout(toastHideTimer);
+    clearTimeout(toastRemoveTimer);
+    toast.classList.remove("show");
+    toastRemoveTimer = setTimeout(function () {
+      pendingUndo = null;
+      toast.hidden = true;
+      if (toast.contains(document.activeElement)) document.activeElement.blur();
+    }, 240);
+  }
+
+  function showToast(message, undo) {
+    clearTimeout(toastHideTimer);
+    clearTimeout(toastRemoveTimer);
+    pendingUndo = undo;
+    toastText.textContent = message;
+    toast.hidden = false;
+    void toast.offsetWidth; // 先回到隐藏态，展开才有过渡
+    toast.classList.add("show");
+    toastHideTimer = setTimeout(hideToast, TOAST_MS);
+  }
+
+  toastAction.addEventListener("click", function () {
+    var undo = pendingUndo;
+    if (!undo) return;
+    hideToast();
+    undo();
+    live.textContent = "已恢复快捷网站";
+  });
+
   function removeSite(index) {
     if (index < 0 || index >= sites.length) return;
+
+    var url = sites[index];
+    var name = siteName(url);
+    var active = document.activeElement;
+    var keepFocus = dockItemsEl.contains(active);
+    var fromTile = keepFocus && active.classList.contains("dock-item");
+
     sites.splice(index, 1);
     saveSites();
     renderDock();
+
+    if (keepFocus) {
+      var next = fromTile && sites.length
+        ? dockItemsEl.children[Math.min(index, sites.length - 1)].querySelector(".dock-item")
+        : null;
+      (next || dockAdd).focus({ preventScroll: true });
+    }
+
+    showToast("已移除 " + name, function () {
+      if (sites.indexOf(url) !== -1 || sites.length >= DOCK_MAX) return;
+      sites.splice(Math.min(index, sites.length), 0, url);
+      saveSites();
+      renderDock();
+    });
   }
 
   dockItemsEl.addEventListener("contextmenu", function (e) {
@@ -513,7 +752,7 @@
     var index = Array.prototype.indexOf.call(dockItemsEl.children, link.parentNode);
     if (index < 0) return;
     e.preventDefault();
-    if (window.confirm("移除 " + siteName(sites[index]) + "？")) removeSite(index);
+    removeSite(index);
   });
 
   dockItemsEl.addEventListener("keydown", function (e) {
@@ -599,7 +838,7 @@
   }
 
   dock.addEventListener("pointermove", function (e) {
-    if (!dockIsOpen) return;
+    if (!dockIsOpen || dragState) return;
     magX = e.clientX;
     if (magRaf) return;
     magRaf = requestAnimationFrame(function () {
@@ -608,12 +847,18 @@
     });
   });
 
-  dock.addEventListener("pointerleave", resetMagnify);
-  dock.addEventListener("pointercancel", resetMagnify);
+  dock.addEventListener("pointerleave", function () {
+    if (!dragState) resetMagnify();
+  });
+  dock.addEventListener("pointercancel", function () {
+    if (!dragState) resetMagnify();
+  });
 
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Escape" || !dockIsOpen) return;
-    if (dockWrap.classList.contains("editing")) {
+    if (dragState) {
+      finishDrag("cancel");
+    } else if (dockWrap.classList.contains("editing")) {
       hideDockForm();
       dockAdd.focus({ preventScroll: true });
     } else {

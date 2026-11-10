@@ -33,6 +33,7 @@
     --tile-fg: rgba(20, 20, 25, .7);
     --tile-strong: rgba(20, 20, 25, .32);
     --tile-letter: rgba(20, 20, 25, .55);
+    --toast-bg: #111113;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -58,6 +59,7 @@
       --tile-strong: rgba(0, 0, 0, .3);
       --tile-fg: rgba(20, 20, 25, .55);
       --tile-letter: rgba(20, 20, 25, .55);
+      --toast-bg: #232327;
     }
   }
 
@@ -411,6 +413,10 @@
     background: var(--tile-bg);
     box-shadow: var(--tile-shadow);
     text-decoration: none;
+    cursor: grab;
+    touch-action: none;
+    -webkit-user-drag: none;
+    user-select: none;
     transition: background-color .16s ease, border-color .16s ease;
   }
 
@@ -441,6 +447,25 @@
   }
 
   .dock-item img.loaded + .dock-letter { opacity: 0; }
+
+  /* 拖动排序：其他图标让位，拖出 dock 则变淡 */
+  .dock-slot.dragging {
+    z-index: 6;
+    transition: none;
+  }
+
+  .dock-slot.dragging .dock-item {
+    cursor: grabbing;
+    box-shadow: var(--tile-shadow), 0 18px 32px -16px rgba(0, 0, 0, .45);
+  }
+
+  .dock-slot.dragging.outside { opacity: .38; }
+
+  .dock-items.reordering .dock-slot {
+    transition: transform .18s cubic-bezier(.2, .7, .3, 1);
+  }
+
+  .dock-items.reordering .dock-slot.dragging { transition: none; }
 
   .dock-add {
     display: grid;
@@ -561,6 +586,69 @@
 
   .dock-note.is-error { color: rgba(255, 140, 140, .95); }
 
+  /* ---- 撤销提示 ---- */
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 28px;
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: calc(100vw - 32px);
+    padding: 7px 7px 7px 14px;
+    border: 1px solid rgba(255, 255, 255, .08);
+    border-radius: 12px;
+    background: var(--toast-bg);
+    box-shadow: 0 18px 40px -18px rgba(0, 0, 0, .55);
+    color: #f4f4f6;
+    font-size: 13px;
+    line-height: 1.2;
+    opacity: 0;
+    transform: translate(-50%, 8px);
+    pointer-events: none;
+    transition: opacity .18s ease, transform .22s cubic-bezier(.2, .7, .3, 1);
+  }
+
+  .toast[hidden] { display: none; }
+
+  .toast.show {
+    opacity: 1;
+    transform: translate(-50%, 0);
+    pointer-events: auto;
+  }
+
+  .toast-text {
+    min-width: 0;
+    overflow: hidden;
+    color: rgba(255, 255, 255, .78);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .toast-action {
+    flex: none;
+    height: 28px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, .12);
+    color: #ffffff;
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color .14s ease;
+  }
+
+  .toast-action:hover { background: rgba(255, 255, 255, .2); }
+
+  .toast-action:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, .6);
+    outline-offset: 2px;
+  }
+
   @keyframes shake {
     25% { transform: translateX(calc(-50% - 4px)); }
     75% { transform: translateX(calc(-50% + 4px)); }
@@ -594,6 +682,7 @@
     .go { width: 44px; height: 44px; }
     .go svg { width: 16px; height: 16px; }
     .brand { font-size: 24px; letter-spacing: .18em; text-indent: .18em; }
+    .toast { bottom: 18px; font-size: 12.5px; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -705,6 +794,12 @@
     <p class="sr-only" id="live" role="status" aria-live="polite"></p>
   </main>
 
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden>
+    <span class="toast-text" id="toastText"></span>
+    <button type="button" class="toast-action" id="toastAction">撤销</button>
+  </div>
+
+<script src="url.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
