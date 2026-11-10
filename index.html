@@ -334,6 +334,11 @@
 
   .dock-dot::before {
     content: "";
+    /* 绝对定位 + 居中：宽度变化时左右两端对称伸缩，不会固定在左边向右长 */
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
     width: 10px;
     height: 10px;
     border-radius: 50%;
