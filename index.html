@@ -398,11 +398,9 @@
     height: 38px;
     visibility: hidden;
     pointer-events: none;
-    /* 图标逐个淡入，容器只负责随接近程度上浮 */
+    /* 用缩放 + 上浮 + 淡入出现，不裁切图标 */
     transform: translateX(-50%)
       translateY(calc((34px * (1 - var(--reveal, 0))) - var(--pop) * var(--lift)));
-    /* 从底部往上揭开，看起来像被横线从下面拉出来 */
-    clip-path: inset(calc((1 - var(--reveal, 0)) * 62%) 0 0 0);
     transition: transform var(--pop-t) ease, opacity .18s ease, visibility 0s .32s;
   }
 
@@ -446,6 +444,9 @@
     background: var(--tile-bg);
     box-shadow: var(--tile-shadow);
     text-decoration: none;
+    transform-origin: center bottom;
+    transform: translateY(calc(10px * (1 - var(--reveal, 0))))
+               scale(calc(.82 + .18 * var(--reveal, 0)));
     cursor: grab;
     touch-action: none;
     -webkit-user-drag: none;

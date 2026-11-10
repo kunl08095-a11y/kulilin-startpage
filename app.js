@@ -659,9 +659,9 @@
     var icons = Math.max(0, Math.min(1, (p - ICON_FROM) / (1 - ICON_FROM)));
     dockWrap.style.setProperty("--reveal", icons.toFixed(3));
 
-    // 横线长度也跟着接近程度连续变长，而不是到某个点突然跳一段
-    var grow = Math.max(0, Math.min(1, (p - 0.15) / 0.85));
-    lineGrow = grow * grow * (3 - 2 * grow);
+    // 横线长度和图标同步：图标长多少，线就长多少
+    var grow = icons * icons * (3 - 2 * icons);
+    lineGrow = grow;
     refreshLine();
 
     // 约 66px 处开始可交互；图标本身按 --reveal 继续淡入，不再有跳变
