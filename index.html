@@ -340,7 +340,8 @@
     width: var(--form-w, 336px);
     height: 70px;
     background: var(--dock-bg);
-    border-radius: 14px;
+    /* 保持胶囊形：线变粗，而不是变成圆角方框 */
+    border-radius: 999px;
     box-shadow: 0 20px 44px -18px rgba(0, 0, 0, .55);
   }
 
@@ -399,7 +400,9 @@
     pointer-events: none;
     /* 图标逐个淡入，容器只负责随接近程度上浮 */
     transform: translateX(-50%)
-      translateY(calc((14px * (1 - var(--reveal, 0))) - var(--pop) * var(--lift)));
+      translateY(calc((34px * (1 - var(--reveal, 0))) - var(--pop) * var(--lift)));
+    /* 从底部往上揭开，看起来像被横线从下面拉出来 */
+    clip-path: inset(calc((1 - var(--reveal, 0)) * 62%) 0 0 0);
     transition: transform var(--pop-t) ease, opacity .18s ease, visibility 0s .32s;
   }
 
@@ -539,7 +542,7 @@
     flex-direction: column;
     justify-content: center;
     gap: 2px;
-    padding: 6px;
+    padding: 6px 20px;
     max-width: calc(100vw - 32px);
     opacity: 0;
     pointer-events: none;
