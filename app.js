@@ -240,6 +240,7 @@
   var dockIsOpen = false;
   var magRaf = 0;
   var magX = null;
+  var magY = null;
 
   var lastLineW = null;     // 横条上一次的宽度，用来决定过渡时长
 
@@ -249,12 +250,12 @@
   var DROP_OUT = 56;    // 拖到 dock 上下方这个距离外松手 = 移除
   var DROP_EDGE = 72;   // 左右同理
 
-  var REVEAL_RADIUS = 120; // 离横线多远开始响应（px）
+  var REVEAL_RADIUS = 200; // 离横线多远开始响应（px）
   var SINK_GAIN = 2;       // 下沉比接近程度快多少倍完成（0.5 处沉到底）
-  var ICON_FROM = 0.45;    // 接近程度超过这里图标才开始淡入
+  var ICON_FROM = 0.35;    // 接近程度超过这里图标才开始淡入
 
-  var MAG_SIGMA = 110;      // 放大影响的范围（px），越大过渡越平缓
-  var MAG_MAX = 1.22;       // 离鼠标最近时放大到的倍数
+  var MAG_SIGMA = 120;      // 放大影响的范围（px），越大过渡越平缓
+  var MAG_MAX = 1.4;        // 离鼠标最近时放大到的倍数
   var MAG_GAP = 6;          // 图标之间的间隙，放大时保持不变
   var TOAST_MS = 6000;
 
@@ -630,7 +631,7 @@
     dockWrap.style.setProperty("--reveal", icons.toFixed(3));
 
     // 约 66px 处开始可交互；图标本身按 --reveal 继续淡入，不再有跳变
-    var open = p >= 0.45;
+    var open = p >= ICON_FROM;
     if (open === dockIsOpen) return;
 
     dockIsOpen = open;
@@ -879,11 +880,14 @@
    *   3. 整排围绕中心对称扩张（左边一半左移、右边一半右移），横条只需居中变宽
    * 因为 offsetLeft/offsetWidth 不受 transform 影响，每一帧读到的都是干净的静止值。
    */
-  function applyMagnify(clientX) {
+  function applyMagnify(clientX, clientY) {
     var slots = visibleSlots();
     if (!slots.length) return;
 
     var mx = clientX - dock.getBoundingClientRect().left;
+    // 用不受抬起动画影响的布局位置算垂直距离，避免“放大→上浮→距离变大”的自反馈
+    var cy = dockWrap.getBoundingClientRect().top + dock.offsetTop + dock.offsetHeight / 2;
+    var dy = Math.max(0, Math.abs(clientY - cy) - dock.offsetHeight / 2);
     var rest = [];
     var restTotal = 0;
 
@@ -899,7 +903,7 @@
     var visualTotal = 0;
     for (var a = 0; a < slots.length; a++) {
       var d = mx - rest[a].center;
-      k[a] = 1 + (MAG_MAX - 1) * Math.exp(-(d * d) / (2 * MAG_SIGMA * MAG_SIGMA));
+      k[a] = 1 + (MAG_MAX - 1) * Math.exp(-(d * d + dy * dy) / (2 * MAG_SIGMA * MAG_SIGMA));
       visualTotal += rest[a].width * k[a];
     }
     visualTotal += MAG_GAP * (slots.length - 1);
@@ -927,6 +931,7 @@
 
   function resetMagnify() {
     magX = null;
+    magY = null;
     if (magRaf) { cancelAnimationFrame(magRaf); magRaf = 0; }
 
     var slots = visibleSlots();
@@ -939,20 +944,34 @@
     setLineWidth(dock.offsetWidth);
   }
 
-  dock.addEventListener("pointermove", function (e) {
-    if (!dockIsOpen || dragState) return;
+  // 放大的触发范围比 dock 本身大一圈：鼠标还在图标旁边的空白处时就先动起来，
+  // 像那里还摆着几个看不见的图标
+  var MAG_REACH_X = 150;
+  var MAG_REACH_TOP = 130;
+  var MAG_REACH_BOTTOM = 110;
+
+  document.addEventListener("pointermove", function (e) {
+    if (e.pointerType === "touch" || dragState) return;
+
+    var r = dock.getBoundingClientRect();
+    var near = e.clientX > r.left - MAG_REACH_X && e.clientX < r.right + MAG_REACH_X &&
+      e.clientY > r.top - MAG_REACH_TOP && e.clientY < r.bottom + MAG_REACH_BOTTOM;
+
+    if (!dockIsOpen || !near) {
+      if (magX !== null) resetMagnify();
+      return;
+    }
+
     magX = e.clientX;
+    magY = e.clientY;
     if (magRaf) return;
     magRaf = requestAnimationFrame(function () {
       magRaf = 0;
-      if (magX !== null) applyMagnify(magX);
+      if (magX !== null) applyMagnify(magX, magY);
     });
   });
 
-  dock.addEventListener("pointerleave", function () {
-    if (!dragState) resetMagnify();
-  });
-  dock.addEventListener("pointercancel", function () {
+  document.addEventListener("pointercancel", function () {
     if (!dragState) resetMagnify();
   });
 

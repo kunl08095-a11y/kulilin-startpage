@@ -361,8 +361,7 @@
   }
 
   .dock {
-    --pop: 0px;      /* 放大时整体抬起多少（JS 设置） */
-    --lift: 0;       /* 鼠标在图标区时为 1，用于让抬起平滑出现 */
+    --pop: 14px;     /* 放大时整排抬起，避免图标底部压到横线 */
     --pop-t: .16s;   /* 抬起/落回的过渡时长，默认平滑，按下时变快 */
     position: absolute;
     top: 50%;
@@ -402,7 +401,7 @@
     height: 38px;
     transform-origin: center center;
     /* 越靠近越清晰：i 越小越先浮现，移开时反向淡出 */
-    opacity: clamp(0, calc((var(--reveal, 0) - .52 - var(--i, 0) * .035) / .24), 1);
+    opacity: clamp(0, calc((var(--reveal, 0) - var(--i, 0) * .05) / .7), 1);
     transition: opacity .2s ease-out, transform .18s ease-out;
   }
 
