@@ -13,6 +13,13 @@
 
   var STORE_KEY = "kulilin.engine";
 
+  var extStore = null;
+  try {
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+      extStore = chrome.storage.local;
+    }
+  } catch (e) { /* file:// 或非扩展环境 */ }
+
   var form = document.getElementById("searchForm");
   var q = document.getElementById("q");
   var btn = document.getElementById("engineBtn");
@@ -37,6 +44,9 @@
 
   function saveEngine(engine) {
     try { localStorage.setItem(STORE_KEY, engine.id); } catch (e) { /* 忽略 */ }
+    if (extStore) {
+      try { var o = {}; o[STORE_KEY] = engine.id; extStore.set(o); } catch (e) {}
+    }
   }
 
   /* ---------- 渲染菜单 ---------- */
@@ -239,9 +249,13 @@
   var sites = loadSites();
   var dockIsOpen = false;
   var magRaf = 0;
+  var magTargetX = null;
+  var magTargetY = null;
   var magX = null;
   var magY = null;
+  var MAG_DAMP = 0.18;      // 每帧向鼠标追 18%，放大中心因此有减速感
 
+  var LINE_BASE = 170;      // 收起时固定的线长：三个图标 + 添加按钮
   var lastLineW = null;     // 横条上一次的宽度，用来决定过渡时长
 
   var dragState = null;
@@ -266,24 +280,32 @@
   var toastRemoveTimer = 0;
   var pendingUndo = null;
 
+  /** 清洗任意来源的站点数组：只留合法网址、去重、限个数 */
+  function cleanSites(raw) {
+    var clean = [];
+    if (!Array.isArray(raw)) return clean;
+    for (var i = 0; i < raw.length && clean.length < DOCK_MAX; i++) {
+      if (typeof raw[i] !== "string") continue;
+      var url = asUrl(raw[i].trim());
+      if (url && clean.indexOf(url) === -1) clean.push(url);
+    }
+    return clean;
+  }
+
   function loadSites() {
     try {
-      var raw = JSON.parse(localStorage.getItem(DOCK_KEY) || "[]");
-      if (!Array.isArray(raw)) return [];
-      var clean = [];
-      for (var i = 0; i < raw.length && clean.length < DOCK_MAX; i++) {
-        if (typeof raw[i] !== "string") continue;
-        var url = asUrl(raw[i].trim());
-        if (url && clean.indexOf(url) === -1) clean.push(url);
-      }
-      return clean;
+      return cleanSites(JSON.parse(localStorage.getItem(DOCK_KEY) || "[]"));
     } catch (e) {
       return [];
     }
   }
 
   function saveSites() {
-    try { localStorage.setItem(DOCK_KEY, JSON.stringify(sites)); } catch (e) {}
+    var json = JSON.stringify(sites);
+    try { localStorage.setItem(DOCK_KEY, json); } catch (e) {}
+    if (extStore) {
+      try { var o = {}; o[DOCK_KEY] = sites; extStore.set(o); } catch (e) {}
+    }
   }
 
   function siteName(url) {
@@ -348,14 +370,21 @@
     dockWrap.style.setProperty("--line-x", width.toFixed(1) + "px");
   }
 
+  /** 横线宽度：收起时固定 170，展开后跟随图标区（含放大让位），但不少于 170 */
+  function lineWidthNow(extra) {
+    if (!sites.length) return 44;
+    if (!dockIsOpen) return LINE_BASE;
+    return Math.max(LINE_BASE, dock.offsetWidth + extra);
+  }
+
   function sizeHandle() {
     var hasSites = sites.length > 0;
     // 图标槽位永远是 38px，dock.offsetWidth 就是静止宽度，不会被放大污染
-    var width = hasSites ? Math.max(44, dock.offsetWidth) : 44;
+    var full = hasSites ? Math.max(44, dock.offsetWidth) : 44;
 
     dockWrap.classList.toggle("has-sites", hasSites);
-    dockWrap.style.width = width + "px";
-    setLineWidth(width);
+    dockWrap.style.width = full + "px";
+    setLineWidth(lineWidthNow(0));
   }
 
   var handleRaf = 0;
@@ -640,10 +669,17 @@
 
     if (open) {
       loadDockIcons();
+      // 鼠标一次跳到 dock 上时，先补一次放大目标，别等下一次 pointermove
+      if (pointerX !== null) {
+        magTargetX = pointerX;
+        magTargetY = pointerY;
+        if (!magRaf) magRaf = requestAnimationFrame(magStep);
+      }
     } else {
       hideDockForm();
       resetMagnify();
     }
+    sizeHandle();
   }
 
   /** 鼠标离横线上下 70px 内、左右端点外 70px 内都算“接近” */
@@ -880,6 +916,26 @@
    *   3. 整排围绕中心对称扩张（左边一半左移、右边一半右移），横条只需居中变宽
    * 因为 offsetLeft/offsetWidth 不受 transform 影响，每一帧读到的都是干净的静止值。
    */
+  /** 指数平滑：鼠标急停或甩动时，放大中心慢慢追上，动画自带减速 */
+  function magStep() {
+    magRaf = 0;
+    if (magTargetX === null) return;
+
+    if (magX === null) {
+      magX = magTargetX;
+      magY = magTargetY;
+    } else {
+      magX += (magTargetX - magX) * MAG_DAMP;
+      magY += (magTargetY - magY) * MAG_DAMP;
+    }
+
+    applyMagnify(magX, magY);
+
+    if (Math.abs(magTargetX - magX) > 0.4 || Math.abs(magTargetY - magY) > 0.4) {
+      magRaf = requestAnimationFrame(magStep);
+    }
+  }
+
   function applyMagnify(clientX, clientY) {
     var slots = visibleSlots();
     if (!slots.length) return;
@@ -924,12 +980,14 @@
     // + 按钮跟着让出半格，和最后一个图标保持 6px
     dockAdd.style.transform = lifted ? "translateX(" + (extra / 2).toFixed(2) + "px)" : "";
 
-    // 横条覆盖整排视觉宽度（含 + 按钮）
-    setLineWidth(dock.offsetWidth + extra);
+    // 横条覆盖整排视觉宽度（含 + 按钮）；收起状态下固定 170
+    setLineWidth(lineWidthNow(extra));
     dockWrap.style.setProperty("--lift", lifted ? "1" : "0");
   }
 
   function resetMagnify() {
+    magTargetX = null;
+    magTargetY = null;
     magX = null;
     magY = null;
     if (magRaf) { cancelAnimationFrame(magRaf); magRaf = 0; }
@@ -941,7 +999,7 @@
     }
     dockAdd.style.transform = "";
     dockWrap.style.setProperty("--lift", "0");
-    setLineWidth(dock.offsetWidth);
+    setLineWidth(lineWidthNow(0));
   }
 
   // 放大的触发范围比 dock 本身大一圈：鼠标还在图标旁边的空白处时就先动起来，
@@ -962,13 +1020,9 @@
       return;
     }
 
-    magX = e.clientX;
-    magY = e.clientY;
-    if (magRaf) return;
-    magRaf = requestAnimationFrame(function () {
-      magRaf = 0;
-      if (magX !== null) applyMagnify(magX, magY);
-    });
+    magTargetX = e.clientX;
+    magTargetY = e.clientY;
+    if (!magRaf) magRaf = requestAnimationFrame(magStep);
   });
 
   document.addEventListener("pointercancel", function () {
@@ -1012,6 +1066,35 @@
   });
 
   selectEngine(readEngine(), false);
+
+  // 扩展环境：启动后从 chrome.storage 拉一次，关掉浏览器也不会丢
+  if (extStore) {
+    try {
+      extStore.get([DOCK_KEY, STORE_KEY], function (data) {
+        if (!data) return;
+
+        if (!Array.isArray(data[DOCK_KEY]) && sites.length) {
+          // 旧版本只存在 localStorage，补写一份到扩展存储
+          saveSites();
+        } else if (Array.isArray(data[DOCK_KEY])) {
+          var clean = cleanSites(data[DOCK_KEY]);
+          if (clean.join("\n") !== sites.join("\n")) {
+            sites = clean;
+            renderDock();
+          }
+        }
+
+        if (typeof data[STORE_KEY] === "string") {
+          for (var i = 0; i < ENGINES.length; i++) {
+            if (ENGINES[i].id === data[STORE_KEY]) {
+              selectEngine(ENGINES[i], false);
+              break;
+            }
+          }
+        }
+      });
+    } catch (e) { /* 忽略 */ }
+  }
 
   // 触屏设备不强弹键盘
   if (window.matchMedia && window.matchMedia("(pointer: fine)").matches) {
