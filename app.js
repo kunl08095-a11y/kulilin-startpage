@@ -256,7 +256,10 @@
   var MAG_DAMP = 0.18;      // 每帧向鼠标追 18%，放大中心因此有减速感
 
   var LINE_BASE = 170;      // 收起时固定的线长：三个图标 + 添加按钮
-  var lastLineW = null;     // 横条上一次的宽度，用来决定过渡时长
+  var lineBase = LINE_BASE; // 随接近程度连续增长的线长
+  var lineExtra = 0;        // 放大让位、拖动时临时加减的宽度
+  var lineGrow = 0;         // 接近程度对应的线长增长比例 0~1
+  var lastLineW = null;
 
   var dragState = null;
   var suppressClick = false;
@@ -357,24 +360,18 @@
    * 横条宽度是唯一的“动画量”：图标的位置和大小每秒 60 帧跟着鼠标走，
    * 横条则用 CSS 过渡去追，变化越大过渡越久，形成非线性呼吸感。
    */
-  function setLineWidth(width) {
-    width = Math.max(0, width);
-    if (lastLineW === null) {
-      lastLineW = width;
-    } else if (Math.abs(width - lastLineW) >= 0.5) {
-      var delta = Math.abs(width - lastLineW);
-      // 小变化 ~120ms，大变化最多 ~260ms
-      dockWrap.style.setProperty("--line-t", Math.round(120 + Math.min(delta, 70) * 2) + "ms");
-      lastLineW = width;
-    }
+  function updateLineWidth(width) {
+    if (lastLineW !== null && Math.abs(width - lastLineW) < 0.3) return;
+    lastLineW = width;
     dockWrap.style.setProperty("--line-x", width.toFixed(1) + "px");
   }
 
-  /** 横线宽度：收起时固定 170，展开后跟随图标区（含放大让位），但不少于 170 */
-  function lineWidthNow(extra) {
-    if (!sites.length) return 44;
-    if (!dockIsOpen) return LINE_BASE;
-    return Math.max(LINE_BASE, dock.offsetWidth + extra);
+  /** 线长 = 170 与「图标区实际宽度 + 放大让位」之间按接近程度插值 */
+  function refreshLine() {
+    if (!sites.length) { updateLineWidth(44); return; }
+    var target = Math.max(LINE_BASE, dock.offsetWidth + lineExtra);
+    lineBase = LINE_BASE + (target - LINE_BASE) * lineGrow;
+    updateLineWidth(lineBase);
   }
 
   function sizeHandle() {
@@ -384,7 +381,8 @@
 
     dockWrap.classList.toggle("has-sites", hasSites);
     dockWrap.style.width = full + "px";
-    setLineWidth(lineWidthNow(0));
+    if (!dockIsOpen) lineGrow = 0;
+    refreshLine();
   }
 
   var handleRaf = 0;
@@ -551,6 +549,7 @@
 
     state.slot.classList.remove("dragging", "outside");
     dockItemsEl.classList.remove("reordering");
+    lineExtra = 0;
     sizeHandle();
 
     var slots = useDockSlots();
@@ -614,7 +613,8 @@
     // 横线随拖出的距离非线性收缩：外移 20px 才明显变短，松手即移除
     var outDist = Math.max(0, dy, Math.abs(dx) - (dragState.pitch * (dragState.centers.length - 1)) / 2);
     var shrink = Math.min(1, Math.pow(outDist / 100, 1.15));
-    setLineWidth(dock.offsetWidth - dragState.slotW * shrink);
+    lineExtra = -dragState.slotW * shrink;
+    refreshLine();
 
     var scale = dragState.outside ? 0.86 : 1.12;
     dragState.slot.style.transform =
@@ -659,6 +659,11 @@
     var icons = Math.max(0, Math.min(1, (p - ICON_FROM) / (1 - ICON_FROM)));
     dockWrap.style.setProperty("--reveal", icons.toFixed(3));
 
+    // 横线长度也跟着接近程度连续变长，而不是到某个点突然跳一段
+    var grow = Math.max(0, Math.min(1, (p - 0.15) / 0.85));
+    lineGrow = grow * grow * (3 - 2 * grow);
+    refreshLine();
+
     // 约 66px 处开始可交互；图标本身按 --reveal 继续淡入，不再有跳变
     var open = p >= ICON_FROM;
     if (open === dockIsOpen) return;
@@ -679,7 +684,6 @@
       hideDockForm();
       resetMagnify();
     }
-    sizeHandle();
   }
 
   /** 鼠标离横线上下 70px 内、左右端点外 70px 内都算“接近” */
@@ -980,8 +984,9 @@
     // + 按钮跟着让出半格，和最后一个图标保持 6px
     dockAdd.style.transform = lifted ? "translateX(" + (extra / 2).toFixed(2) + "px)" : "";
 
-    // 横条覆盖整排视觉宽度（含 + 按钮）；收起状态下固定 170
-    setLineWidth(lineWidthNow(extra));
+    // 横条覆盖整排视觉宽度（含 + 按钮）
+    lineExtra = Math.round(extra);
+    refreshLine();
     dockWrap.style.setProperty("--lift", lifted ? "1" : "0");
   }
 
@@ -999,7 +1004,8 @@
     }
     dockAdd.style.transform = "";
     dockWrap.style.setProperty("--lift", "0");
-    setLineWidth(lineWidthNow(0));
+    lineExtra = 0;
+    refreshLine();
   }
 
   // 放大的触发范围比 dock 本身大一圈：鼠标还在图标旁边的空白处时就先动起来，

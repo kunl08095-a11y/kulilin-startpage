@@ -316,25 +316,47 @@
     z-index: 20;
   }
 
+  /* 横线本体：收起时是一条线，点 + 时自己长成一个输入框 */
+  .dock-handle {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    z-index: 1;
+    width: var(--line-x, 170px);
+    height: 32px;
+    translate: -50% -50%;
+    border-radius: 999px;
+    background: transparent;
+    transform: translateY(calc(var(--sink, 0) * var(--handle-drop, 50px)));
+    transition: width .26s cubic-bezier(.22, .8, .3, 1),
+                height .3s cubic-bezier(.22, .8, .3, 1),
+                background-color .24s ease,
+                border-radius .3s cubic-bezier(.22, .8, .3, 1),
+                box-shadow .24s ease,
+                transform .18s ease-out;
+  }
+
+  .dock-wrap.editing .dock-handle {
+    width: var(--form-w, 336px);
+    height: 70px;
+    background: var(--dock-bg);
+    border-radius: 14px;
+    box-shadow: 0 20px 44px -18px rgba(0, 0, 0, .55);
+  }
+
   .dock-dot {
     position: absolute;
     inset: 0;
-    z-index: 1;
-    display: grid;
-    place-items: center;
+    z-index: 2;
     padding: 0;
     border: 0;
     background: none;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
-    /* 线先沉到位，图标再浮现，避免渐变过程中两者叠在一起 */
-    transform: translateY(calc(var(--sink, 0) * var(--handle-drop, 50px)));
-    transition: transform .18s ease-out;
   }
 
   .dock-dot::before {
     content: "";
-    /* 绝对定位 + 居中：宽度变化时左右两端对称伸缩，不会固定在左边向右长 */
     position: absolute;
     left: 50%;
     top: 50%;
@@ -343,16 +365,17 @@
     height: 10px;
     border-radius: 50%;
     background: var(--handle);
-    /* 宽度只由 --line-x 决定（JS 算好的 px），过渡时长随变化量调整 */
-    transition: width var(--line-t, .18s) cubic-bezier(.22, .8, .3, 1),
-                height .26s ease, border-radius .26s ease, opacity .2s ease;
+    transition: width .24s cubic-bezier(.22, .8, .3, 1),
+                height .26s ease, border-radius .26s ease, opacity .16s ease;
   }
 
   .dock-wrap.has-sites .dock-dot::before {
-    width: var(--line-x, 44px);
+    width: 100%;
     height: 5px;
     border-radius: 999px;
   }
+
+  .dock-wrap.editing .dock-dot::before { opacity: 0; }
 
   .dock-dot:focus-visible {
     outline: 2px solid var(--line-strong);
@@ -377,13 +400,13 @@
     /* 图标逐个淡入，容器只负责随接近程度上浮 */
     transform: translateX(-50%)
       translateY(calc((14px * (1 - var(--reveal, 0))) - var(--pop) * var(--lift)));
-    transition: transform var(--pop-t) ease, visibility 0s .32s;
+    transition: transform var(--pop-t) ease, opacity .18s ease, visibility 0s .32s;
   }
 
   .dock-wrap.open .dock {
     visibility: visible;
     pointer-events: auto;
-    transition: transform var(--pop-t) ease, visibility 0s;
+    transition: transform var(--pop-t) ease, opacity .18s ease, visibility 0s;
   }
 
   .dock-items {
@@ -510,45 +533,28 @@
 
   .dock-form {
     position: absolute;
-    top: calc(100% + 9px);
-    left: 50%;
+    inset: 0;
+    z-index: 3;
     display: flex;
     flex-direction: column;
+    justify-content: center;
     gap: 2px;
-    width: var(--line-x, 44px);
-    max-width: calc(100vw - 32px);
     padding: 6px;
-    border: 1px solid rgba(255, 255, 255, .1);
-    border-radius: 14px;
-    background: var(--dock-bg);
-    box-shadow: 0 20px 44px -18px rgba(0, 0, 0, .55);
-    visibility: hidden;
+    max-width: calc(100vw - 32px);
+    opacity: 0;
     pointer-events: none;
-    transform: translateX(-50%) scaleY(.065);
-    transform-origin: top center;
-    transition: width .34s cubic-bezier(.4, 0, .2, 1),
-                transform .34s cubic-bezier(.4, 0, .2, 1),
-                visibility 0s .34s;
+    transition: opacity .14s ease;
   }
 
   .dock-wrap.editing .dock-form {
-    width: var(--form-w, 336px);
-    visibility: visible;
-    pointer-events: auto;
-    transform: translateX(-50%) scaleY(1);
-    transition: width .34s cubic-bezier(.4, 0, .2, 1),
-                transform .34s cubic-bezier(.4, 0, .2, 1),
-                visibility 0s;
-  }
-
-  .dock-form > * {
-    opacity: 0;
-    transition: opacity .16s ease;
-  }
-
-  .dock-wrap.editing .dock-form > * {
     opacity: 1;
-    transition: opacity .2s ease .12s;
+    pointer-events: auto;
+    transition: opacity .2s ease .1s;
+  }
+
+  .dock-wrap.editing .dock {
+    opacity: 0;
+    pointer-events: none;
   }
 
   .dock-form.invalid { animation: shake .3s ease; }
@@ -756,30 +762,15 @@
       </form>
 
       <div class="dock-wrap" id="dockWrap">
-        <button
-          type="button"
-          class="dock-dot"
-          id="dockDot"
-          aria-label="快捷网站"
-          aria-expanded="false"
-          aria-controls="dock"
-        ></button>
-
-        <nav class="dock" id="dock" aria-label="快捷网站">
-          <div class="dock-items" id="dockItems"></div>
-
+        <div class="dock-handle" id="dockHandle">
           <button
             type="button"
-            class="dock-add"
-            id="dockAdd"
-            aria-label="添加快捷网站"
+            class="dock-dot"
+            id="dockDot"
+            aria-label="快捷网站"
             aria-expanded="false"
-            title="添加快捷网站"
-          >
-            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-            </svg>
-          </button>
+            aria-controls="dock"
+          ></button>
 
           <form class="dock-form" id="dockAddForm">
             <div class="dock-row">
@@ -801,6 +792,23 @@
             </div>
             <p class="dock-note" id="dockNote" role="status">回车添加 · 右键图标可移除</p>
           </form>
+        </div>
+
+        <nav class="dock" id="dock" aria-label="快捷网站">
+          <div class="dock-items" id="dockItems"></div>
+
+          <button
+            type="button"
+            class="dock-add"
+            id="dockAdd"
+            aria-label="添加快捷网站"
+            aria-expanded="false"
+            title="添加快捷网站"
+          >
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </button>
         </nav>
       </div>
     </div>
