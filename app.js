@@ -581,7 +581,8 @@
     var p = Math.max(0, Math.min(1, progress));
     dockWrap.style.setProperty("--reveal", p.toFixed(3));
 
-    var open = p >= 0.8; // 距横条约 13px 以内完全展开
+    // 约 32px 处开始可交互；图标本身按 --reveal 继续淡入，不再有跳变
+    var open = p >= 0.5;
     if (open === dockIsOpen) return;
 
     dockIsOpen = open;
