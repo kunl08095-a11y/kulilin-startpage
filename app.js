@@ -253,8 +253,8 @@
   var SINK_GAIN = 2;       // 下沉比接近程度快多少倍完成（0.5 处沉到底）
   var ICON_FROM = 0.45;    // 接近程度超过这里图标才开始淡入
 
-  var MAG_SIGMA = 95;       // 放大影响的范围（px），越大波及的邻居越多
-  var MAG_MAX = 1.4;        // 离鼠标最近时放大到的倍数
+  var MAG_SIGMA = 110;      // 放大影响的范围（px），越大过渡越平缓
+  var MAG_MAX = 1.22;       // 离鼠标最近时放大到的倍数
   var MAG_GAP = 6;          // 图标之间的间隙，放大时保持不变
   var TOAST_MS = 6000;
 
