@@ -311,17 +311,17 @@
     top: calc(100% + 24px);
     left: 50%;
     translate: -50% 0;
+    width: 44px;          /* JS 会改成图标区的实际宽度 */
     height: 32px;
     z-index: 20;
   }
 
   .dock-dot {
-    position: relative;
+    position: absolute;
+    inset: 0;
     z-index: 1;
     display: grid;
     place-items: center;
-    width: 44px;
-    height: 32px;
     padding: 0;
     border: 0;
     background: none;
@@ -329,7 +329,7 @@
     -webkit-tap-highlight-color: transparent;
     /* 线先沉到位，图标再浮现，避免渐变过程中两者叠在一起 */
     transform: translateY(calc(var(--sink, 0) * var(--handle-drop, 50px)));
-    transition: transform .18s ease-out, width .26s ease;
+    transition: transform .18s ease-out;
   }
 
   .dock-dot::before {
@@ -338,11 +338,13 @@
     height: 10px;
     border-radius: 50%;
     background: var(--handle);
-    transition: width .26s ease, height .26s ease, border-radius .26s ease, opacity .2s ease;
+    /* 宽度只由 --line-x 决定（JS 算好的 px），过渡时长随变化量调整 */
+    transition: width var(--line-t, .18s) cubic-bezier(.22, .8, .3, 1),
+                height .26s ease, border-radius .26s ease, opacity .2s ease;
   }
 
   .dock-wrap.has-sites .dock-dot::before {
-    width: 100%;
+    width: var(--line-x, 44px);
     height: 5px;
     border-radius: 999px;
   }
@@ -354,6 +356,9 @@
   }
 
   .dock {
+    --pop: 0px;      /* 放大时整体抬起多少（JS 设置） */
+    --lift: 0;       /* 鼠标在图标区时为 1，用于让抬起平滑出现 */
+    --pop-t: .16s;   /* 抬起/落回的过渡时长，默认平滑，按下时变快 */
     position: absolute;
     top: 50%;
     left: 50%;
@@ -366,14 +371,15 @@
     visibility: hidden;
     pointer-events: none;
     /* 图标逐个淡入，容器只负责随接近程度上浮 */
-    transform: translateX(-50%) translateY(calc(14px * (1 - var(--reveal, 0))));
-    transition: transform .18s ease-out, visibility 0s .32s;
+    transform: translateX(-50%)
+      translateY(calc((14px * (1 - var(--reveal, 0))) - var(--pop) * var(--lift)));
+    transition: transform var(--pop-t) ease, visibility 0s .32s;
   }
 
   .dock-wrap.open .dock {
     visibility: visible;
     pointer-events: auto;
-    transition: transform .18s ease-out, visibility 0s;
+    transition: transform var(--pop-t) ease, visibility 0s;
   }
 
   .dock-items {
@@ -382,15 +388,17 @@
     gap: 6px;
   }
 
+  /* 槽位永远保持 38px，不动布局；放大和让位全部交给 transform，
+     这样每帧只合成、不重排，也不会把放大后的宽度记成“正常宽度” */
   .dock-slot,
   .dock-add {
     flex: none;
     width: 38px;
     height: 38px;
-    transform-origin: bottom center;
+    transform-origin: center center;
     /* 越靠近越清晰：i 越小越先浮现，移开时反向淡出 */
     opacity: clamp(0, calc((var(--reveal, 0) - .52 - var(--i, 0) * .035) / .24), 1);
-    transition: opacity .2s ease-out, transform .09s linear;
+    transition: opacity .2s ease-out, transform .18s ease-out;
   }
 
   .dock-slot {
@@ -402,6 +410,7 @@
     inset: 0;
     display: grid;
     place-items: center;
+    background-color: var(--tile-bg);
     border: 1px solid var(--tile-border);
     border-radius: 11px;
     background: var(--tile-bg);
@@ -442,6 +451,13 @@
 
   .dock-item img.loaded + .dock-letter { opacity: 0; }
 
+  /* macOS 式缩放：用独立的 scale 属性，不影响拖动排序的 translate 和让位 */
+  .dock-item img,
+  .dock-letter {
+    scale: var(--k, 1);
+    transition: opacity .18s ease, scale var(--k-t, .1s) ease-out;
+  }
+
   /* 拖动排序：其他图标让位，拖出 dock 则变淡 */
   .dock-slot.dragging {
     z-index: 6;
@@ -471,7 +487,7 @@
     color: var(--tile-fg);
     box-shadow: var(--tile-shadow);
     cursor: pointer;
-    transition: transform .09s linear, background-color .16s ease, border-color .16s ease, opacity .18s ease;
+    transition: transform .18s cubic-bezier(.2, .7, .3, 1), background-color .16s ease, border-color .16s ease, opacity .18s ease;
   }
 
   .dock-add:hover {
@@ -495,7 +511,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    width: var(--line-w, 44px);
+    width: var(--line-x, 44px);
     max-width: calc(100vw - 32px);
     padding: 6px;
     border: 1px solid rgba(255, 255, 255, .1);
