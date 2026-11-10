@@ -247,7 +247,9 @@
   var DROP_OUT = 56;    // 拖到 dock 上下方这个距离外松手 = 移除
   var DROP_EDGE = 72;   // 左右同理
 
-  var REVEAL_RADIUS = 64;
+  var REVEAL_RADIUS = 120; // 离横线多远开始响应（px）
+  var SINK_GAIN = 2;       // 下沉比接近程度快多少倍完成（0.5 处沉到底）
+  var ICON_FROM = 0.45;    // 接近程度超过这里图标才开始淡入
   var TOAST_MS = 6000;
 
   var toast = document.getElementById("toast");
@@ -579,10 +581,15 @@
 
   function applyReveal(progress) {
     var p = Math.max(0, Math.min(1, progress));
-    dockWrap.style.setProperty("--reveal", p.toFixed(3));
+    var sunk = sink(p);
+    dockWrap.style.setProperty("--sink", sunk.toFixed(3));
 
-    // 约 32px 处开始可交互；图标本身按 --reveal 继续淡入，不再有跳变
-    var open = p >= 0.5;
+    // 横线沉到底后图标才浮现，避免图标压在线上
+    var icons = Math.max(0, Math.min(1, (p - ICON_FROM) / (1 - ICON_FROM)));
+    dockWrap.style.setProperty("--reveal", icons.toFixed(3));
+
+    // 约 66px 处开始可交互；图标本身按 --reveal 继续淡入，不再有跳变
+    var open = p >= 0.45;
     if (open === dockIsOpen) return;
 
     dockIsOpen = open;
@@ -597,6 +604,7 @@
     }
   }
 
+  /** 鼠标离横线上下 70px 内、左右端点外 70px 内都算“接近” */
   function proximityAt(x, y) {
     var rect = dockWrap.getBoundingClientRect();
     var top = rect.top + rect.height / 2;
@@ -606,6 +614,11 @@
     var dy = y < top ? top - y : (y > bottom ? y - bottom : 0);
     var distance = Math.sqrt(dx * dx + dy * dy);
     return Math.max(0, 1 - distance / REVEAL_RADIUS);
+  }
+
+  /** 展开程度 → 横线下沉量（0~1），比靠得最近的那一下更早沉到底 */
+  function sink(progress) {
+    return Math.min(1, progress * SINK_GAIN);
   }
 
   function updateProximity() {

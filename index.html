@@ -328,7 +328,7 @@
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
     /* 线先沉到位，图标再浮现，避免渐变过程中两者叠在一起 */
-    transform: translateY(calc(min(1, calc(var(--reveal, 0) * 1.5)) * var(--handle-drop, 50px)));
+    transform: translateY(calc(var(--sink, 0) * var(--handle-drop, 50px)));
     transition: transform .18s ease-out, width .26s ease;
   }
 
