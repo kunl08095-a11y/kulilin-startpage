@@ -374,8 +374,13 @@
    * 收起时线长跟随图标数量，但最多 170（三个图标 + 按钮）；
    * 展开后允许超过 170，覆盖整排（含放大让位）。
    */
-  function refreshLine() {
+  function refreshLine(widthOverride) {
     if (!sites.length) { updateLineWidth(44); return; }
+    if (typeof widthOverride === "number") {
+      lineBase = widthOverride;
+      updateLineWidth(lineBase);
+      return;
+    }
     var minW = Math.min(LINE_BASE, dock.offsetWidth);
     var target = Math.max(minW, dock.offsetWidth + lineExtra);
     lineBase = minW + (target - minW) * lineGrow;
@@ -804,30 +809,36 @@
     }
     restTotal += dockGap * (count - 1);
 
-    // e = 0：所有图标缩进横线中心；e = 1：铺满整排。间距也一起从 0 长到 6px。
-    var gap = dockGap * e;
+    // 任何时刻「图标排的外宽」和横线一致：刚冒头时先从线的基本长度开始，
+    // 图标一边长大一边把整排撑到最终宽度，余量均匀分给图标间距。
     var center = dock.offsetWidth / 2;
+    var baseSpan = Math.max(44, Math.min(LINE_BASE, restTotal));
+    var span = baseSpan + (restTotal - baseSpan) * e;
     var grow = [];
-    var visualTotal = 0;
+    var natural = 0;
 
     for (var b = 0; b < count; b++) {
-      var spreadCenter = center + (rest[b].center - center) * e;
+      // 用按比例铺开后的槽位中心算放大，鼠标在左/右时近的一侧先变大
+      var slotCenter = center + (rest[b].center - center) * (span / restTotal);
       var k = 1;
       if (mx !== null) {
-        var dist = mx - spreadCenter;
+        var dist = mx - slotCenter;
         k = 1 + (MAG_MAX - 1) * Math.exp(-(dist * dist + dy * dy) / (2 * MAG_SIGMA * MAG_SIGMA));
       }
       grow.push(k);
-      visualTotal += rest[b].width * e * k;
+      natural += rest[b].width * e * k;
     }
-    visualTotal += gap * (count - 1);
 
-    // 放大让出来的宽度：横条跟着变宽，整排稍稍抬起
-    var extra = Math.max(0, visualTotal - restTotal * e);
-    lineExtra = Math.round(extra);
-    refreshLine();
+    // 图标总宽超过线长时把线撑开，避免挤成一团；否则把余量均匀分给间距
+    if (count > 1) {
+      span = Math.max(span, natural + dockGap * (count - 1));
+    } else {
+      span = Math.max(span, natural);
+    }
+    refreshLine(span);
 
-    var x = center - visualTotal / 2;
+    var gap = count > 1 ? (span - natural) / (count - 1) : 0;
+    var x = center - span / 2;
     for (var c = 0; c < count; c++) {
       var scale = e * grow[c];
       var tx = x + (rest[c].width * scale) / 2 - rest[c].center;
@@ -836,7 +847,7 @@
       x += rest[c].width * scale + gap;
     }
 
-    dockWrap.style.setProperty("--lift", e > 0.85 && extra > 0.5 ? "1" : "0");
+    dockWrap.style.setProperty("--lift", e > 0.85 && span > restTotal + 0.5 ? "1" : "0");
   }
 
   /** 鼠标离横线上下 160px 内、左右端点外 160px 内都算“接近” */
