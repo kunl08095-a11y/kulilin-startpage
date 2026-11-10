@@ -248,12 +248,17 @@
 
   var sites = loadSites();
   var dockIsOpen = false;
-  var magRaf = 0;
+  var pTarget = 0;          // 目标接近度 0~1
+  var pNow = 0;             // 每帧阻尼后的接近度，所有出现动画都由它驱动
+  var dockTickRaf = 0;
   var magTargetX = null;
   var magTargetY = null;
   var magX = null;
   var magY = null;
   var MAG_DAMP = 0.18;      // 每帧向鼠标追 18%，放大中心因此有减速感
+  var P_DAMP = 0.16;        // 接近度同样阻尼推进，靠近/离开都不会硬切
+  var dockGap = 6;
+  var REDUCE_MOTION = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
 
   var LINE_BASE = 170;      // 收起时固定的线长：三个图标 + 添加按钮
   var lineBase = LINE_BASE; // 随接近程度连续增长的线长
@@ -273,7 +278,6 @@
 
   var MAG_SIGMA = 100;      // 放大影响的范围（px），越大过渡越平缓
   var MAG_MAX = 1.4;        // 离鼠标最近时放大到的倍数
-  var MAG_GAP = 6;          // 图标之间的间隙，放大时保持不变
   var TOAST_MS = 6000;
 
   var toast = document.getElementById("toast");
@@ -379,14 +383,14 @@
   }
 
   function sizeHandle() {
+    dockGap = parseFloat(getComputedStyle(dockItemsEl).columnGap) || 6;
     var hasSites = sites.length > 0;
     // 图标槽位永远是 38px，dock.offsetWidth 就是静止宽度，不会被放大污染
     var full = hasSites ? Math.max(44, dock.offsetWidth) : 44;
 
     dockWrap.classList.toggle("has-sites", hasSites);
     dockWrap.style.width = full + "px";
-    if (!dockIsOpen) lineGrow = 0;
-    refreshLine();
+    layoutDock();
   }
 
   var handleRaf = 0;
@@ -554,10 +558,15 @@
     state.slot.classList.remove("dragging", "outside");
     dockItemsEl.classList.remove("reordering");
     lineExtra = 0;
+    // 布局会重新写回所有图标的 transform（包括被拖动的那个），不用手动清
     sizeHandle();
 
-    var slots = useDockSlots();
-    for (var i = 0; i < slots.length; i++) slots[i].style.transform = "";
+    // 松手后鼠标通常还停在图标上，立刻恢复放大，不等下一次 pointermove
+    if (pointerX !== null && pointerNearDock(pointerX, pointerY)) {
+      magTargetX = pointerX;
+      magTargetY = pointerY;
+      startDockTick();
+    }
 
     if (!state.started) return;
 
@@ -654,43 +663,183 @@
   var pointerX = null;
   var pointerY = null;
 
+  function clamp01(value) {
+    return value < 0 ? 0 : value > 1 ? 1 : value;
+  }
+
+  function smoothstep(value) {
+    var t = clamp01(value);
+    return t * t * (3 - 2 * t);
+  }
+
+  /** 把接近度设成目标值；真正的画面交给 dockTick 每帧阻尼推进 */
   function applyReveal(progress) {
-    var p = Math.max(0, Math.min(1, progress));
-    var sunk = sink(p);
-    dockWrap.style.setProperty("--sink", sunk.toFixed(3));
+    pTarget = clamp01(progress);
+    startDockTick();
+  }
 
-    // 横线沉到底后图标才浮现，避免图标压在线上
-    var icons = Math.max(0, Math.min(1, (p - ICON_FROM) / (1 - ICON_FROM)));
-    dockWrap.style.setProperty("--reveal", icons.toFixed(3));
+  /** 点横线时立即展开，保证 focus() 时元素已经可见 */
+  function revealNow() {
+    pTarget = 1;
+    pNow = 1;
+    setDockOpen(true);
+    layoutDock();
+  }
 
-    // 横线长度和图标同步：图标长多少，线就长多少
-    var grow = icons * icons * (3 - 2 * icons);
-    lineGrow = grow;
-    refreshLine();
-
-    // 约 66px 处开始可交互；图标本身按 --reveal 继续淡入，不再有跳变
-    var open = p >= ICON_FROM;
+  function setDockOpen(open) {
     if (open === dockIsOpen) return;
-
     dockIsOpen = open;
     dockWrap.classList.toggle("open", open);
     dockDot.setAttribute("aria-expanded", open ? "true" : "false");
 
     if (open) {
       loadDockIcons();
-      // 鼠标一次跳到 dock 上时，先补一次放大目标，别等下一次 pointermove
-      if (pointerX !== null) {
-        magTargetX = pointerX;
-        magTargetY = pointerY;
-        if (!magRaf) magRaf = requestAnimationFrame(magStep);
-      }
     } else {
       hideDockForm();
-      resetMagnify();
+      resetMagnifyState();
     }
   }
 
-  /** 鼠标离横线上下 70px 内、左右端点外 70px 内都算“接近” */
+  function startDockTick() {
+    if (!dockTickRaf) dockTickRaf = requestAnimationFrame(dockTick);
+  }
+
+  /**
+   * 一个循环同时推进三样东西：接近度、放大中心、横线状态。
+   * 鼠标停下后会自己收敛、停表，不会空转。
+   */
+  function dockTick() {
+    dockTickRaf = 0;
+    var moving = false;
+
+    if (REDUCE_MOTION) {
+      pNow = pTarget;
+      magX = magTargetX;
+      magY = magTargetY;
+      layoutDock();
+      return;
+    }
+
+    var dp = pTarget - pNow;
+    if (Math.abs(dp) > 0.0006) {
+      pNow += dp * P_DAMP;
+      moving = true;
+    } else {
+      pNow = pTarget;
+    }
+
+    if (magTargetX === null) {
+      if (magX !== null) {
+        magX = null;
+        magY = null;
+        moving = true;
+      }
+    } else if (magX === null) {
+      magX = magTargetX;
+      magY = magTargetY;
+      moving = true;
+    } else {
+      var mx = magTargetX - magX;
+      var my = magTargetY - magY;
+      if (Math.abs(mx) > 0.25 || Math.abs(my) > 0.25) {
+        magX += mx * MAG_DAMP;
+        magY += my * MAG_DAMP;
+        moving = true;
+      } else {
+        magX = magTargetX;
+        magY = magTargetY;
+      }
+    }
+
+    layoutDock();
+
+    if (moving) dockTickRaf = requestAnimationFrame(dockTick);
+  }
+
+  /**
+   * 每帧按“接近程度 + 鼠标位置”重排 dock：
+   *   1. 接近程度 e 决定图标从横线里长出多少：缩放从 0 到 1、整排从中心向两侧铺开；
+   *   2. 鼠标位置决定每个图标放大多少，放大后的图标把邻居推开，左右距离随之变化；
+   *   3. “+”（dock-add）和普通图标走同一套计算，一起出现、一起被放大/让位。
+   * 只改 transform，不动布局；offsetLeft/offsetWidth 永远是干净的静止值。
+   */
+  function layoutDock() {
+    var e = smoothstep(clamp01((pNow - ICON_FROM) / (1 - ICON_FROM)));
+    var sunk = sink(pNow);
+
+    dockWrap.style.setProperty("--sink", sunk.toFixed(3));
+    dockWrap.style.setProperty("--reveal", e.toFixed(3));
+
+    lineGrow = e;
+    setDockOpen(pNow >= ICON_FROM);
+
+    // 拖动时图标位置由拖动逻辑接管；编辑时 dock 本身隐藏
+    if (dragState || dockWrap.classList.contains("editing")) {
+      refreshLine();
+      return;
+    }
+
+    var entries = [];
+    for (var i = 0; i < dockItemsEl.children.length; i++) {
+      entries.push(dockItemsEl.children[i]);
+    }
+    entries.push(dockAdd);
+
+    var count = entries.length;
+    if (!count) { refreshLine(); return; }
+
+    var wrapRect = dockWrap.getBoundingClientRect();
+    var originX = wrapRect.left + (dockWrap.clientWidth - dock.offsetWidth) / 2;
+    // 图标从横线里往上浮，算垂直距离时跟着它当前的高度走，鼠标才像真的在图标旁边
+    var centerY = wrapRect.top + dock.offsetTop + dock.offsetHeight / 2 + 34 * (1 - e);
+    var mx = magX === null ? null : magX - originX;
+    var dy = magY === null ? 0 : Math.max(0, Math.abs(magY - centerY) - dock.offsetHeight / 2);
+
+    var rest = [];
+    var restTotal = 0;
+    for (var a = 0; a < count; a++) {
+      var width = entries[a].offsetWidth || 38;
+      rest.push({ el: entries[a], center: entries[a].offsetLeft + width / 2, width: width });
+      restTotal += width;
+    }
+    restTotal += dockGap * (count - 1);
+
+    // e = 0：所有图标缩进横线中心；e = 1：铺满整排。间距也一起从 0 长到 6px。
+    var gap = dockGap * e;
+    var center = dock.offsetWidth / 2;
+    var grow = [];
+    var visualTotal = 0;
+
+    for (var b = 0; b < count; b++) {
+      var spreadCenter = center + (rest[b].center - center) * e;
+      var k = 1;
+      if (mx !== null) {
+        var dist = mx - spreadCenter;
+        k = 1 + (MAG_MAX - 1) * Math.exp(-(dist * dist + dy * dy) / (2 * MAG_SIGMA * MAG_SIGMA));
+      }
+      grow.push(k);
+      visualTotal += rest[b].width * e * k;
+    }
+    visualTotal += gap * (count - 1);
+
+    // 放大让出来的宽度：横条跟着变宽，整排稍稍抬起
+    var extra = Math.max(0, visualTotal - restTotal * e);
+    lineExtra = Math.round(extra);
+    refreshLine();
+
+    var x = center - visualTotal / 2;
+    for (var c = 0; c < count; c++) {
+      var scale = e * grow[c];
+      var tx = x + (rest[c].width * scale) / 2 - rest[c].center;
+      entries[c].style.transform = "translateX(" + tx.toFixed(2) + "px) scale(" + scale.toFixed(3) + ")";
+      entries[c].style.zIndex = grow[c] > 1.06 ? "3" : "";
+      x += rest[c].width * scale + gap;
+    }
+
+    dockWrap.style.setProperty("--lift", e > 0.85 && extra > 0.5 ? "1" : "0");
+  }
+
+  /** 鼠标离横线上下 160px 内、左右端点外 160px 内都算“接近” */
   function proximityAt(x, y) {
     var rect = dockWrap.getBoundingClientRect();
     var top = rect.top + rect.height / 2;
@@ -870,7 +1019,7 @@
 
   dockDot.addEventListener("click", function () {
     dockPinned = true;
-    applyReveal(1);
+    revealNow();
     var first = dockItemsEl.querySelector(".dock-item");
     (first || dockAdd).focus({ preventScroll: true });
   });
@@ -895,11 +1044,15 @@
 
   document.documentElement.addEventListener("pointerleave", function () {
     pointerX = null;
+    resetMagnifyState();
+    startDockTick();
     if (dockPinned || dockWrap.classList.contains("editing")) return;
     applyReveal(0);
   });
 
   window.addEventListener("blur", function () {
+    resetMagnifyState();
+    startDockTick();
     if (dockPinned || dockWrap.classList.contains("editing")) return;
     applyReveal(0);
   });
@@ -913,130 +1066,61 @@
 
   /* ---------- 放大 + 左右让位（类似 macOS Dock） ---------- */
 
-  function visibleSlots() {
-    return Array.prototype.slice.call(dock.querySelectorAll(".dock-slot"));
-  }
-
-  /**
-   * 只改 transform，不动任何布局宽度：
-   *   1. 每个图标按与鼠标的距离做高斯放大，视觉宽度 = 38 * k
-   *   2. 整排按“上一个的右沿 + 6px”重新排布，相邻间距恒为 6，永远不会叠住
-   *   3. 整排围绕中心对称扩张（左边一半左移、右边一半右移），横条只需居中变宽
-   * 因为 offsetLeft/offsetWidth 不受 transform 影响，每一帧读到的都是干净的静止值。
-   */
-  /** 指数平滑：鼠标急停或甩动时，放大中心慢慢追上，动画自带减速 */
-  function magStep() {
-    magRaf = 0;
-    if (magTargetX === null) return;
-
-    if (magX === null) {
-      magX = magTargetX;
-      magY = magTargetY;
-    } else {
-      magX += (magTargetX - magX) * MAG_DAMP;
-      magY += (magTargetY - magY) * MAG_DAMP;
-    }
-
-    applyMagnify(magX, magY);
-
-    if (Math.abs(magTargetX - magX) > 0.4 || Math.abs(magTargetY - magY) > 0.4) {
-      magRaf = requestAnimationFrame(magStep);
-    }
-  }
-
-  function applyMagnify(clientX, clientY) {
-    var slots = visibleSlots();
-    if (!slots.length) return;
-
-    var mx = clientX - dock.getBoundingClientRect().left;
-    // 用不受抬起动画影响的布局位置算垂直距离，避免“放大→上浮→距离变大”的自反馈
-    var cy = dockWrap.getBoundingClientRect().top + dock.offsetTop + dock.offsetHeight / 2;
-    var dy = Math.max(0, Math.abs(clientY - cy) - dock.offsetHeight / 2);
-    var rest = [];
-    var restTotal = 0;
-
-    for (var i = 0; i < slots.length; i++) {
-      var left = slots[i].offsetLeft;
-      var width = slots[i].offsetWidth || 38;
-      rest.push({ left: left, width: width, center: left + width / 2 });
-      restTotal += width;
-    }
-    restTotal += MAG_GAP * (slots.length - 1);
-
-    var k = [];
-    var visualTotal = 0;
-    for (var a = 0; a < slots.length; a++) {
-      var d = mx - rest[a].center;
-      k[a] = 1 + (MAG_MAX - 1) * Math.exp(-(d * d + dy * dy) / (2 * MAG_SIGMA * MAG_SIGMA));
-      visualTotal += rest[a].width * k[a];
-    }
-    visualTotal += MAG_GAP * (slots.length - 1);
-
-    var extra = visualTotal - restTotal;
-    var pos = rest[0].left - extra / 2;
-    var lifted = extra > 0.5;
-
-    for (var b = 0; b < slots.length; b++) {
-      var slot = slots[b];
-      var w = rest[b].width * k[b];
-      var tx = pos - rest[b].left + (w - rest[b].width) / 2;
-      slot.style.transform = "translateX(" + tx.toFixed(2) + "px) scale(" + k[b].toFixed(3) + ")";
-      slot.style.zIndex = k[b] > 1.06 ? "3" : "";
-      pos += w + MAG_GAP;
-    }
-
-    // + 按钮跟着让出半格，和最后一个图标保持 6px
-    dockAdd.style.transform = lifted ? "translateX(" + (extra / 2).toFixed(2) + "px)" : "";
-
-    // 横条覆盖整排视觉宽度（含 + 按钮）
-    lineExtra = Math.round(extra);
-    refreshLine();
-    dockWrap.style.setProperty("--lift", lifted ? "1" : "0");
-  }
-
-  function resetMagnify() {
+  function resetMagnifyState() {
     magTargetX = null;
     magTargetY = null;
     magX = null;
     magY = null;
-    if (magRaf) { cancelAnimationFrame(magRaf); magRaf = 0; }
-
-    var slots = visibleSlots();
-    for (var i = 0; i < slots.length; i++) {
-      slots[i].style.transform = "";
-      slots[i].style.zIndex = "";
-    }
-    dockAdd.style.transform = "";
     dockWrap.style.setProperty("--lift", "0");
-    lineExtra = 0;
-    refreshLine();
   }
 
-  // 放大的触发范围比 dock 本身大一圈：鼠标还在图标旁边的空白处时就先动起来，
-  // 像那里还摆着几个看不见的图标
-  var MAG_REACH_X = 100;
-  var MAG_REACH_TOP = 80;
-  var MAG_REACH_BOTTOM = 70;
+  function resetMagnify() {
+    resetMagnifyState();
 
+    if (dragState) {
+      // 拖动前先量位置：清掉内联位移，量到的才是图标真正停着的地方
+      var entries = [];
+      for (var i = 0; i < dockItemsEl.children.length; i++) entries.push(dockItemsEl.children[i]);
+      entries.push(dockAdd);
+      for (var a = 0; a < entries.length; a++) {
+        entries[a].style.transform = "";
+        entries[a].style.zIndex = "";
+      }
+      lineExtra = 0;
+      refreshLine();
+    } else {
+      startDockTick();
+    }
+  }
+
+  // 放大和“接近”用同一个判定范围：横线刚开始沉、图标刚冒头时，
+  // 鼠标还在下方的接近区里，缩放就已经跟着鼠标位置走了
+  function pointerNearDock(x, y) {
+    return proximityAt(x, y) > 0;
+  }
+
+  // 鼠标位置只作为“放大的目标”，每帧由 dockTick 阻尼追上；
+  // dock 还没完全出现时也照样算，图标一冒头就是被鼠标顶大的样子
   document.addEventListener("pointermove", function (e) {
     if (e.pointerType === "touch" || dragState) return;
 
-    var r = dock.getBoundingClientRect();
-    var near = e.clientX > r.left - MAG_REACH_X && e.clientX < r.right + MAG_REACH_X &&
-      e.clientY > r.top - MAG_REACH_TOP && e.clientY < r.bottom + MAG_REACH_BOTTOM;
-
-    if (!dockIsOpen || !near) {
-      if (magX !== null) resetMagnify();
+    if (!pointerNearDock(e.clientX, e.clientY)) {
+      if (magX !== null || magTargetX !== null) {
+        resetMagnifyState();
+        startDockTick();
+      }
       return;
     }
 
     magTargetX = e.clientX;
     magTargetY = e.clientY;
-    if (!magRaf) magRaf = requestAnimationFrame(magStep);
+    startDockTick();
   });
 
   document.addEventListener("pointercancel", function () {
-    if (!dragState) resetMagnify();
+    if (dragState) return;
+    resetMagnifyState();
+    startDockTick();
   });
 
   document.addEventListener("keydown", function (e) {
