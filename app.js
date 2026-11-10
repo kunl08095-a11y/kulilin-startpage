@@ -366,11 +366,15 @@
     dockWrap.style.setProperty("--line-x", width.toFixed(1) + "px");
   }
 
-  /** 线长 = 170 与「图标区实际宽度 + 放大让位」之间按接近程度插值 */
+  /**
+   * 收起时线长跟随图标数量，但最多 170（三个图标 + 按钮）；
+   * 展开后允许超过 170，覆盖整排（含放大让位）。
+   */
   function refreshLine() {
     if (!sites.length) { updateLineWidth(44); return; }
-    var target = Math.max(LINE_BASE, dock.offsetWidth + lineExtra);
-    lineBase = LINE_BASE + (target - LINE_BASE) * lineGrow;
+    var minW = Math.min(LINE_BASE, dock.offsetWidth);
+    var target = Math.max(minW, dock.offsetWidth + lineExtra);
+    lineBase = minW + (target - minW) * lineGrow;
     updateLineWidth(lineBase);
   }
 
