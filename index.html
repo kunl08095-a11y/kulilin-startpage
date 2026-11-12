@@ -7,7 +7,10 @@
 <meta name="theme-color" content="#fbfbfa" media="(prefers-color-scheme: light)" />
 <meta name="theme-color" content="#0a0a0b" media="(prefers-color-scheme: dark)" />
 <title>KULILIN</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23111114'/%3E%3Ctext x='32' y='45' font-family='Helvetica,Arial,sans-serif' font-size='36' font-weight='600' fill='%23ffffff' text-anchor='middle'%3EK%3C/text%3E%3C/svg%3E" />
+<link rel="icon" type="image/png" sizes="16x16" href="icons/icon16.png" />
+<link rel="icon" type="image/png" sizes="32x32" href="icons/icon32.png" />
+<link rel="icon" type="image/png" sizes="48x48" href="icons/icon48.png" />
+<link rel="icon" type="image/png" sizes="128x128" href="icons/icon128.png" />
 <style>
   :root {
     color-scheme: light dark;
@@ -52,13 +55,14 @@
       --glow: rgba(96, 130, 255, .12);
       --dock-bg: #16161a;
       --handle: rgba(245, 245, 247, .82);
-      --tile-bg: #f3f3f5;
-      --tile-border: rgba(0, 0, 0, .1);
-      --tile-hover: #ffffff;
-      --tile-shadow: 0 10px 24px -12px rgba(0, 0, 0, .75);
-      --tile-strong: rgba(0, 0, 0, .3);
-      --tile-fg: rgba(20, 20, 25, .55);
-      --tile-letter: rgba(20, 20, 25, .55);
+      /* 暗色下图标底不再是一块亮白，改成中性灰，压住整页的亮度 */
+      --tile-bg: #9a9aa3;
+      --tile-border: rgba(255, 255, 255, .12);
+      --tile-hover: #a7a7b0;
+      --tile-shadow: 0 10px 24px -12px rgba(0, 0, 0, .8), 0 1px 2px rgba(0, 0, 0, .35);
+      --tile-strong: rgba(20, 20, 25, .38);
+      --tile-fg: rgba(20, 20, 25, .62);
+      --tile-letter: rgba(20, 20, 25, .6);
       --toast-bg: #232327;
     }
   }
@@ -138,7 +142,8 @@
     backdrop-filter: blur(18px) saturate(170%);
     box-shadow: var(--shadow);
     transition: border-color .3s ease, box-shadow .3s ease;
-    animation: rise .5s cubic-bezier(.22, .68, .16, 1) both .06s;
+    /* 首帧就是完整搜索栏：只轻微上浮，不把引擎按钮和搜索按钮藏起来 */
+    animation: rise-bar .5s cubic-bezier(.22, .68, .16, 1) both;
   }
 
   .search:focus-within,
@@ -308,7 +313,7 @@
 
   .dock-wrap {
     position: absolute;
-    top: calc(100% + 24px);
+    top: calc(100% + 48px);
     left: 50%;
     translate: -50% 0;
     width: 44px;          /* JS 会改成图标区的实际宽度 */
@@ -316,45 +321,55 @@
     z-index: 20;
   }
 
-  /* 横线本体：收起时是一条线，点 + 时自己长成一个输入框 */
+  /* 横线本体就是可见的那条线（无站点时是小圆点）。
+     上边固定，点 + 时只往下长成圆角矩形，颜色过渡到输入底。 */
   .dock-handle {
     position: absolute;
     left: 50%;
-    top: 50%;
-    z-index: 1;
-    width: var(--line-x, 170px);
-    height: 32px;
-    translate: -50% -50%;
-    border-radius: 999px;
-    background: transparent;
+    /* 与原先居中时的上边对齐，高度变化只往下长 */
+    top: calc(50% - 5px);
+    z-index: 2;
+    width: 10px;
+    height: 10px;
+    translate: -50% 0;
+    border-radius: 5px;
+    background: var(--handle);
     transform: translateY(calc(var(--sink, 0) * var(--handle-drop, 50px)));
-    transition: width .26s cubic-bezier(.22, .8, .3, 1),
-                height .3s cubic-bezier(.22, .8, .3, 1),
-                background-color .24s ease,
-                border-radius .3s cubic-bezier(.22, .8, .3, 1),
-                box-shadow .24s ease;
+    transition: width .32s cubic-bezier(.22, .8, .3, 1),
+                height .32s cubic-bezier(.22, .8, .3, 1),
+                background-color .28s ease,
+                border-radius .32s cubic-bezier(.215, .61, .355, 1),
+                box-shadow .28s ease;
+  }
+
+  .dock-wrap.has-sites .dock-handle {
+    top: calc(50% - 20.5px);
+    width: var(--line-x, 170px);
+    height: 5px;
+    border-radius: 2.5px;
   }
 
   /* 出现/收回时横线宽度逐帧跟着图标排走，关掉宽度过渡，避免和阻尼打架 */
   .dock-wrap.revealing .dock-handle {
-    transition: height .3s cubic-bezier(.22, .8, .3, 1),
-                background-color .24s ease,
-                border-radius .3s cubic-bezier(.22, .8, .3, 1),
-                box-shadow .24s ease;
+    transition: height .32s cubic-bezier(.22, .8, .3, 1),
+                background-color .28s ease,
+                border-radius .32s cubic-bezier(.215, .61, .355, 1),
+                box-shadow .28s ease;
   }
 
   .dock-wrap.editing .dock-handle {
+    z-index: 3;
     width: var(--form-w, 336px);
     height: 70px;
     background: var(--dock-bg);
-    /* 保持胶囊形：线变粗，而不是变成圆角方框 */
-    border-radius: 999px;
+    border-radius: 16px;
     box-shadow: 0 20px 44px -18px rgba(0, 0, 0, .55);
   }
 
   .dock-dot {
     position: absolute;
-    inset: 0;
+    /* 横线变薄后，仍留出一点可点区域 */
+    inset: -14px 0;
     z-index: 2;
     padding: 0;
     border: 0;
@@ -363,27 +378,10 @@
     -webkit-tap-highlight-color: transparent;
   }
 
-  .dock-dot::before {
-    content: "";
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--handle);
-    transition: width .24s cubic-bezier(.22, .8, .3, 1),
-                height .26s ease, border-radius .26s ease, opacity .16s ease;
+  .dock-wrap.open .dock-dot,
+  .dock-wrap.editing .dock-dot {
+    pointer-events: none;
   }
-
-  .dock-wrap.has-sites .dock-dot::before {
-    width: 100%;
-    height: 5px;
-    border-radius: 999px;
-  }
-
-  .dock-wrap.editing .dock-dot::before { opacity: 0; }
 
   .dock-dot:focus-visible {
     outline: 2px solid var(--line-strong);
@@ -392,11 +390,10 @@
   }
 
   .dock {
-    --pop: 14px;     /* 放大时整排抬起，避免图标底部压到横线 */
     position: absolute;
     top: 50%;
     left: 50%;
-    z-index: 2;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -405,8 +402,9 @@
     visibility: hidden;
     pointer-events: none;
     /* 图标从横线中心长出来：位置、缩放、透明都由 JS 每帧驱动 */
+    /* 整排常驻抬高 14px：图标底边不压横线，悬停/离开也不再整排浮动 */
     transform: translateX(-50%)
-      translateY(calc((34px * (1 - var(--reveal, 0))) - var(--pop) * var(--lift)));
+      translateY(calc(34px * (1 - var(--reveal, 0)) - 14px));
     transition: opacity .18s ease, visibility 0s .6s;
   }
 
@@ -429,7 +427,7 @@
     flex: none;
     width: 38px;
     height: 38px;
-    transform-origin: center center;
+    transform-origin: center bottom;
     /* 越靠近越清晰：i 越小越先浮现，移开时反向淡出；
        transform 由 JS 逐帧写入，这里不挂过渡，避免和阻尼打架 */
     opacity: clamp(0, calc(var(--reveal, 0) * 1.45 - var(--i, 0) * .05), 1);
@@ -546,17 +544,19 @@
     max-width: calc(100vw - 32px);
     opacity: 0;
     pointer-events: none;
+    /* 收回时文字先消失，避免被压进细线里 */
     transition: opacity .14s ease;
   }
 
   .dock-wrap.editing .dock-form {
     opacity: 1;
     pointer-events: auto;
-    transition: opacity .2s ease .1s;
+    /* 等横线开始长厚，再淡入文字 */
+    transition: opacity .22s cubic-bezier(.22, .8, .3, 1) .08s;
   }
 
   .dock-wrap.editing .dock {
-    opacity: 0;
+    /* 展开输入框时图标保持可见，只是不接收点击 */
     pointer-events: none;
   }
 
@@ -682,6 +682,11 @@
     to   { opacity: 1; transform: none; }
   }
 
+  @keyframes rise-bar {
+    from { transform: translateY(12px); }
+    to   { transform: none; }
+  }
+
   @keyframes pop {
     from { opacity: 0; transform: translateY(-5px) scale(.985); }
     to   { opacity: 1; transform: none; }
@@ -690,7 +695,7 @@
   @media (max-width: 520px) {
     .stage { gap: 30px; padding: 40px 20px 10vh; }
     .search { height: 56px; }
-    .dock-wrap { top: calc(100% + 20px); --handle-drop: 44px; }
+    .dock-wrap { top: calc(100% + 40px); --handle-drop: 44px; }
     .dock { height: 32px; gap: 5px; }
     .dock-items { gap: 5px; }
     .dock-slot, .dock-add { width: 32px; height: 32px; }
@@ -824,7 +829,7 @@
     <button type="button" class="toast-action" id="toastAction">撤销</button>
   </div>
 
-<script src="url.js"></script>
-<script src="app.js"></script>
+<script src="url.js?v=20261112"></script>
+<script src="app.js?v=20261112-1800"></script>
 </body>
 </html>

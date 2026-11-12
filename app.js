@@ -251,15 +251,33 @@
   var pTarget = 0;          // 目标接近度 0~1
   var pNow = 0;             // 每帧阻尼后的接近度，所有出现动画都由它驱动
   var dockTickRaf = 0;
+  var lastTickTs = 0;       // 上一帧的时间戳，用来把限速折算成真正的时间
   var magTargetX = null;
   var magTargetY = null;
-  var magX = null;
+  var magX = null;          // 放大中心：指针离开后保留最后位置，供回落用
   var magY = null;
-  var liftNow = 0;          // 放大抬起量，带阻尼，0~1
-  var liftTarget = 0;
+  var magFade = 0;          // 放大强度 0~1：指针离开接近区后缓慢退回 0，图标不硬切
+  var magFadeTarget = 0;
+  var editMagX = null;      // 点 + 时钉住的放大状态，取消后从这里平滑追上指针
+  var editMagY = null;
+  var editMagFade = 0;
+  var editCatch = null;     // 取消添加后的过渡：{ t0, from*, to* }
+  var EDIT_CATCH_MS = 800;  // 过渡时长，配合 1-(1-t)^3，从容不跳
+
+  function easeOutCubic(t) {
+    var u = 1 - t;
+    return 1 - u * u * u;
+  }
+  var LINE_PAD = 8;         // 线两端的内边距：图标不贴着线端，线随整排宽度伸缩
   var MAG_DAMP = 0.18;      // 每帧向鼠标追 18%，放大中心因此有减速感
-  var P_DAMP = 0.16;        // 接近度同样阻尼推进，靠近/离开都不会硬切
-  var LIFT_DAMP = 0.12;     // 抬起/落回也走阻尼，不跟二值开关硬切
+  var MAG_IN_MS = 520;      // 放大进入时长，用 1-(1-t)^3，和横线、图标出现一致
+  var MAG_OUT_MS = 520;     // 放大回落同样用递减凸函数
+  var pFrom = 0;
+  var pAnimTo = 0;
+  var pT0 = 0;
+  var magFadeFrom = 0;
+  var magFadeTo = 0;
+  var magFadeT0 = 0;
   var dockGap = 6;
   var REDUCE_MOTION = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
 
@@ -276,10 +294,14 @@
   var DROP_EDGE = 72;   // 左右同理
 
   var REVEAL_RADIUS = 160; // 离横线多远开始响应（px）
-  var SINK_GAIN = 2;       // 下沉比接近程度快多少倍完成（0.5 处沉到底）
-  var ICON_FROM = 0.35;    // 接近程度超过这里图标才开始淡入
+  var REVEAL_MS = 520;     // 图标出现/收回时长，用 1-(1-t)^3，和横线上下移动一致
+  var SINK_MS = 520;       // 横线上、下移动时长，用 1-(1-t)^3，先快后慢落到终点
+  var sinkNow = 0;
+  var sinkFrom = 0;
+  var sinkTo = 0;
+  var sinkT0 = 0;
 
-  var MAG_SIGMA = 100;      // 放大影响的范围（px），越大过渡越平缓
+  var MAG_SIGMA = 60;       // 放大影响的范围（px），越小越集中在指针附近
   var MAG_MAX = 1.4;        // 离鼠标最近时放大到的倍数
   var TOAST_MS = 6000;
 
@@ -411,63 +433,359 @@
     });
   });
 
-  var ICON_SOURCES = [
-    function (host) { return "https://" + host + "/favicon.ico"; },
-    function (host) { return "https://favicon.cccyun.cc/" + host; },
-    function (host) { return "https://www.faviconextractor.com/favicon/" + host; }
-  ];
+  /* ---------- 图标：多源择优（取尺寸最大的）+ 本地缓存 ---------- */
 
-  function loadIcon(img, host) {
+  // 23px 的格子在 3 倍屏、悬停放大 1.4 倍时要吃到约 97 物理像素，
+  // 所以统一按 128×128 处理：缓存里只留这一份，显示时不再临时挑来源
+  var ICON_SIZE = 128;
+  var ICON_CACHE_KEY = "kulilin.icons";
+  var ICON_TTL = 30 * 24 * 60 * 60 * 1000; // 一个月后后台再确认一次
+  var ICON_PROBE_MS = 3500;                // 单个来源最多等这么久
+  var ICON_SETTLE_MS = 4200;               // 所有来源的总等待上限
+  var ICON_MIN_SHARP = 48;                 // 比这更小的源不再二次放大
+
+  var iconCache = readIconCache();
+  var iconMissed = {};      // host -> 时间戳：最近没找到图标，十分钟内不再问
+  var ICON_MISS_TTL = 10 * 60 * 1000;
+  var iconInflight = {};
+
+  function readIconCache() {
+    try {
+      var raw = JSON.parse(localStorage.getItem(ICON_CACHE_KEY) || "{}");
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw;
+    } catch (e) { /* 坏数据就当没有 */ }
+    return {};
+  }
+
+  function writeIconCache() {
+    if (extStore) {
+      try { var o = {}; o[ICON_CACHE_KEY] = iconCache; extStore.set(o); } catch (e) { }
+    }
+    try { localStorage.setItem(ICON_CACHE_KEY, JSON.stringify(iconCache)); } catch (e) { }
+  }
+
+  function storeIcon(host, entry) {
+    iconCache[host] = entry;
+
+    // 换站点换得多了会攒下一堆用不着的图标，超过 60 条就丢最旧的
+    var hosts = Object.keys(iconCache);
+    if (hosts.length > 60) {
+      hosts.sort(function (a, b) { return (iconCache[a].t || 0) - (iconCache[b].t || 0); });
+      for (var i = 0; i < hosts.length - 60; i++) delete iconCache[hosts[i]];
+    }
+    writeIconCache();
+  }
+
+  /** 候选来源：站点自己的高清图标优先，第三方服务兜底；
+   *  打分 = 像素数 × 权重，大图优先，像素相同时看来源可信度 */
+  function iconCandidates(host) {
+    return [
+      { url: "https://" + host + "/apple-touch-icon.png", rank: 3 },
+      { url: "https://" + host + "/apple-touch-icon-precomposed.png", rank: 2 },
+      // 找不到图标时它给一张灰色圆圈 SVG 占位图，所以只要位图结果
+      { url: "https://favicon.im/" + host, rank: 4, bitmap: true },
+      { url: "https://" + host + "/favicon.ico", rank: 2 },
+      { url: "https://favicon.cccyun.cc/" + host, rank: 2 }
+    ];
+  }
+
+  function probeIcon(cand, done) {
+    var img = new Image();
+    var finished = false;
+    var timer = setTimeout(function () { finish(null); }, ICON_PROBE_MS);
+
+    function finish(entry) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      img.onload = null;
+      img.onerror = null;
+      if (!entry) img.src = "";
+      done(entry);
+    }
+
+    img.referrerPolicy = "no-referrer";
+    img.onload = function () {
+      var w = img.naturalWidth || 0;
+      var h = img.naturalHeight || 0;
+      // 只认位图的来源，遇到占位 SVG 就当没找到
+      if (!w && cand.bitmap) { finish(null); return; }
+      // 只有 viewBox 的 SVG 拿不到固有尺寸，按矢量算：任意尺寸都清晰
+      finish({ url: cand.url, w: Math.max(w, h), rank: cand.rank, vector: !w });
+    };
+    img.onerror = function () { finish(null); };
+    img.src = cand.url;
+  }
+
+  function iconScore(entry) {
+    return (entry.vector ? 512 : entry.w) * entry.rank;
+  }
+
+  /** 分数 = 像素数 × 来源可信度，谁高用谁 */
+  function pickIcon(list) {
+    var best = null;
+    for (var i = 0; i < list.length; i++) {
+      if (!best || iconScore(list[i]) > iconScore(best)) best = list[i];
+    }
+    return best;
+  }
+
+  function applyIcon(img, entry) {
+    if (!entry) return;
+    if (entry.miss) {  // 这个站点确实没有能用的图标，退回首字母
+      img.removeAttribute("src");
+      img.classList.remove("loaded");
+      return;
+    }
+    var src = entry.d || entry.u;
+    if (!src) return;
+    if (img.getAttribute("src") !== src) img.src = src;
+    img.classList.add("loaded");
+  }
+
+  /**
+   * 找一个 host 的图标：先并行问所有来源，谁先回先显示，
+   * 等尺寸明显更大的结果到了再换一次；最后把 128px 版本写进缓存。
+   */
+  function resolveIcon(host, done) {
+    if (iconInflight[host]) { iconInflight[host].push(done); return; }
+
+    var waiters = iconInflight[host] = [done];
+    var cands = iconCandidates(host);
+    var results = [];
+    var shown = null;
     var settled = false;
+    var left = cands.length;
 
-    function finish(url) {
-      if (settled) return;
-      settled = true;
-      img.src = url;
-      img.classList.add("loaded");
+    function emit(entry) {
+      for (var i = 0; i < waiters.length; i++) waiters[i](entry);
     }
 
-    function probe(url, wait) {
-      var image = new Image();
-      var timer = setTimeout(function () {
-        image.onload = null;
-        image.onerror = null;
-        image.src = "";
-      }, wait);
-
-      image.referrerPolicy = "no-referrer";
-      image.onload = function () {
-        clearTimeout(timer);
-        finish(url);
-      };
-      image.onerror = function () {
-        clearTimeout(timer);
-      };
-      image.src = url;
+    function offer(entry) {
+      if (!entry) return;
+      results.push(entry);
+      var best = pickIcon(results);
+      // 只好一点点就不换，避免图标来回闪
+      if (shown && iconScore(best) < iconScore(shown) * 1.5) return;
+      shown = best;
+      emit(best);
     }
 
-    // 直连站点图标和国内图标服务同时查，谁先回来用谁
-    probe(ICON_SOURCES[0](host), 4000);
-    probe(ICON_SOURCES[1](host), 4000);
-
-    setTimeout(function () {
-      if (!settled) probe(ICON_SOURCES[2](host), 5000);
-    }, 1200);
-
-    setTimeout(function () {
+    function settle() {
       if (settled) return;
       settled = true;
-      img.remove();
-    }, 7000);
+
+      var best = pickIcon(results);
+      if (!best) {
+        iconMissed[host] = Date.now();
+        storeIcon(host, { miss: 1, t: Date.now() });
+        emit({ miss: 1 });
+        return;
+      }
+
+      var entry = { u: best.url, w: best.w, t: Date.now() };
+      storeIcon(host, entry);
+      emit(entry);
+
+      // 能读到字节就顺手裁成 128px 存下来，之后连网络都不用走
+      cacheIconBytes(best, host, function (data, placeholder) {
+        if (placeholder) {
+          // 第三方服务给的占位图（灰圈），不如显示首字母
+          iconMissed[host] = Date.now();
+          storeIcon(host, { miss: 1, t: Date.now() });
+          emit({ miss: 1 });
+          return;
+        }
+        if (!data) return;
+        var hit = iconCache[host] || entry;
+        hit.miss = 0;
+        hit.d = data;
+        hit.t = Date.now();
+        storeIcon(host, hit);
+        emit(hit);
+      });
+    }
+
+    for (var i = 0; i < cands.length; i++) {
+      (function (cand) {
+        probeIcon(cand, function (entry) {
+          left--;
+          if (settled) {
+            // 总等待时间之后才回来的结果也别扔，至少先显示出来
+            if (entry && !shown) {
+              shown = entry;
+              emit(entry);
+              storeIcon(host, { u: entry.url, w: entry.w, t: Date.now() });
+            }
+            return;
+          }
+          offer(entry);
+          if (left === 0) settle();
+        });
+      })(cands[i]);
+    }
+
+    setTimeout(settle, ICON_SETTLE_MS);
+  }
+
+  function cacheIconBytes(best, host, done) {
+    // 太小的位图就别二次放大，原样用；矢量要转成 128 才耐放大
+    if (!best.vector && best.w && best.w < ICON_MIN_SHARP) { done(""); return; }
+
+    // favicon.im 查不到图标时给一张灰圈占位图，得靠像素识别出来
+    var strict = best.url.indexOf("favicon.im/") >= 0;
+    var proxy = "https://wsrv.nl/?url=" + encodeURIComponent(best.url) +
+      "&w=" + ICON_SIZE + "&h=" + ICON_SIZE + "&fit=contain&output=png";
+
+    function viaProxy() {
+      fetchBlob(proxy, function (blob) { encodeIcon(blob, done, strict); });
+    }
+
+    if (best.vector) { viaProxy(); return; }  // 矢量交给图床光栅化，128px 才够清晰
+
+    // 站点图标大多不带 CORS，直接取失败就借 wsrv 转一次
+    fetchBlob(best.url, function (blob) {
+      if (blob) encodeIcon(blob, done, strict);
+      else viaProxy();
+    });
+  }
+
+  function fetchBlob(url, done) {
+    var opts = { mode: "cors", credentials: "omit", referrerPolicy: "no-referrer" };
+    try {
+      fetch(url, opts).then(function (res) {
+        if (!res.ok) { done(null); return; }
+        res.blob().then(function (blob) { done(blob); }, function () { done(null); });
+      }, function () { done(null); });
+    } catch (e) { done(null); }
+  }
+
+  /** 第三方服务的占位图通常是「一圈灰 + 大片透明」，
+   *  真正的站点图标要么铺满，要么是彩色的 */
+  function looksLikePlaceholder(canvas) {
+    try {
+      var probe = document.createElement("canvas");
+      probe.width = probe.height = 32;
+      var pctx = probe.getContext("2d");
+      pctx.drawImage(canvas, 0, 0, 32, 32);
+      var px = pctx.getImageData(0, 0, 32, 32).data;
+      var opaque = 0, gray = 0;
+      for (var i = 0; i < px.length; i += 4) {
+        if (px[i + 3] < 40) continue;
+        opaque++;
+        var r = px[i], g = px[i + 1], b = px[i + 2];
+        if (Math.abs(r - g) < 16 && Math.abs(g - b) < 16) gray++;
+      }
+      if (!opaque) return true;
+      var cover = opaque / 1024;
+      return cover > 0.25 && cover < 0.62 && gray / opaque > 0.97;
+    } catch (e) { return false; }
+  }
+
+  /** 把任意图标压成 128×128 透明背景的 PNG data URL */
+  function encodeIcon(blob, done, strict) {
+    if (!blob) { done(""); return; }
+
+    var url = "";
+    try { url = URL.createObjectURL(blob); } catch (e) { done(""); return; }
+
+    var img = new Image();
+    img.onload = function () {
+      var w = img.naturalWidth || 0;
+      var h = img.naturalHeight || 0;
+      if (!w || !h) {
+        // 矢量放到正方形里重新量，让 viewBox 撑满而不是停在 300×150
+        img.width = img.height = ICON_SIZE;
+        w = h = ICON_SIZE;
+      }
+
+      var canvas = document.createElement("canvas");
+      canvas.width = canvas.height = ICON_SIZE;
+      var ctx = canvas.getContext("2d");
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+
+      var scale = Math.min(ICON_SIZE / w, ICON_SIZE / h);
+      var dw = Math.max(1, Math.round(w * scale));
+      var dh = Math.max(1, Math.round(h * scale));
+      ctx.drawImage(img, Math.round((ICON_SIZE - dw) / 2), Math.round((ICON_SIZE - dh) / 2), dw, dh);
+
+      var placeholder = strict && looksLikePlaceholder(canvas);
+      var data = "";
+      try { data = canvas.toDataURL("image/png"); } catch (e) { data = ""; }
+      URL.revokeObjectURL(url);
+      done(placeholder ? "" : data, placeholder);
+    };
+    img.onerror = function () { URL.revokeObjectURL(url); done(""); };
+    img.src = url;
+  }
+
+  function refreshIcon(img, host) {
+    resolveIcon(host, function (entry) { if (entry) applyIcon(img, entry); });
+  }
+
+  /** 缓存里只有地址、没有图片数据时，后台补一份 128px */
+  function upgradeIcon(img, host) {
+    var hit = iconCache[host];
+    if (!hit || !hit.u || hit.d || hit.miss) return;
+
+    cacheIconBytes({ url: hit.u, w: hit.w || 0, vector: false }, host, function (data, placeholder) {
+      if (placeholder) {
+        iconMissed[host] = Date.now();
+        storeIcon(host, { miss: 1, t: Date.now() });
+        applyIcon(img, { miss: 1 });
+        return;
+      }
+      if (!data) return;
+      var fresh = iconCache[host];
+      if (!fresh || fresh.u !== hit.u) return;
+      fresh.d = data;
+      fresh.t = Date.now();
+      storeIcon(host, fresh);
+      img.src = data;
+    });
+  }
+
+  function paintIcon(img, host) {
+    var hit = iconCache[host];
+    var stale = !!(hit && hit.t && Date.now() - hit.t > ICON_TTL);
+
+    // 0) 记着"这站没有能用的图标"：直接留首字母，别每次重新问
+    if (hit && hit.miss) {
+      applyIcon(img, { miss: 1 });
+      if (stale) refreshIcon(img, host);
+      return;
+    }
+
+    // 1) 本地已经有 128px 数据：直接上，一个请求都不发
+    if (hit && hit.d) {
+      applyIcon(img, hit);
+      if (stale) refreshIcon(img, host);
+      return;
+    }
+
+    // 2) 只记住过地址：先显示，再后台补图片数据
+    if (hit && hit.u) {
+      applyIcon(img, hit);
+      if (stale) refreshIcon(img, host);
+      else upgradeIcon(img, host);
+      return;
+    }
+
+    // 3) 第一次见：联网找；刚问过没结果的先别重复问
+    if (iconMissed[host] && Date.now() - iconMissed[host] < ICON_MISS_TTL) return;
+    resolveIcon(host, function (entry) { if (entry) applyIcon(img, entry); });
   }
 
   function loadDockIcons() {
-    var imgs = dockItemsEl.querySelectorAll("img[data-host]");
+    var imgs = dockItemsEl.querySelectorAll("img[data-host], img[data-icon-host]");
     for (var i = 0; i < imgs.length; i++) {
       var img = imgs[i];
-      var host = img.dataset.host;
-      img.removeAttribute("data-host");
-      loadIcon(img, host);
+      if (img.dataset.host) {
+        img.dataset.iconHost = img.dataset.host;
+        img.removeAttribute("data-host");
+      }
+      paintIcon(img, img.dataset.iconHost);
     }
   }
 
@@ -670,24 +988,74 @@
   var proximityRaf = 0;
   var pointerX = null;
   var pointerY = null;
+  var RETRACT_DELAY = 1500; // 鼠标移开后先停这么久，图标和横条再一起收（ms）
+  var retractTimer = 0;     // 排队的收回计时器
+  var REVEAL_DWELL_MS = 160; // 进入感应区后要停这么久才展开，快速路过不触发
+  var revealEnterAt = 0;
+  var revealDwellTimer = 0;
+  var ENTRANCE_MS = 560;    // 与搜索栏入场时长对齐：结束前不按指针位置展开
+  var entranceDone = REDUCE_MOTION;
+  var pointerArmed = false; // 入场后指针真正移动过，才允许按接近度展开
+  var armX = null;
+  var armY = null;
+  var ARM_MOVE = 3;         // 至少移动 3px 才算一次新的指针移动
+
+  if (!entranceDone) {
+    setTimeout(function () { entranceDone = true; }, ENTRANCE_MS);
+  }
+
+  function isDockHeld() {
+    return dockPinned || dockWrap.classList.contains("editing");
+  }
 
   function clamp01(value) {
     return value < 0 ? 0 : value > 1 ? 1 : value;
   }
 
-  function smoothstep(value) {
-    var t = clamp01(value);
-    return t * t * (3 - 2 * t);
+  /** 把接近度设成目标值；真正的画面交给 dockTick 用递减凸函数推进 */
+  function applyReveal(progress) {
+    var next = clamp01(progress);
+    if (next > 0) {
+      cancelRetract();  // 鼠标回来了：取消排队
+      pTarget = next;
+      startDockTick();
+      return;
+    }
+    if (pTarget <= 0 || retractTimer) return; // 已经收了，或者已经在排队
+    // 先别动：图标和横条一起在原地待 RETRACT_DELAY，路过的鼠标不会让它闪一下
+    retractTimer = setTimeout(function () {
+      retractTimer = 0;
+      pTarget = 0;
+      fadeOutMagnify();
+      startDockTick();
+    }, RETRACT_DELAY);
   }
 
-  /** 把接近度设成目标值；真正的画面交给 dockTick 每帧阻尼推进 */
-  function applyReveal(progress) {
+  /** 取消排队的收回（鼠标回来、或者明确要收） */
+  function cancelRetract() {
+    if (!retractTimer) return;
+    clearTimeout(retractTimer);
+    retractTimer = 0;
+  }
+
+  function cancelRevealDwell() {
+    revealEnterAt = 0;
+    if (!revealDwellTimer) return;
+    clearTimeout(revealDwellTimer);
+    revealDwellTimer = 0;
+  }
+
+  /** 明确要收（Esc、点空白处）：不排队，立刻开始收回 */
+  function applyRevealNow(progress) {
+    cancelRetract();
     pTarget = clamp01(progress);
+    if (pTarget < 1) fadeOutMagnify();
     startDockTick();
   }
 
   /** 点横线时展开；可见性先打开，尺寸仍交给阻尼循环推进 */
   function revealNow() {
+    cancelRetract();  // 点线展开时，别让之前排队的收回再把它关掉
     pTarget = 1;
     setDockOpen(true);
     startDockTick();
@@ -703,9 +1071,20 @@
     if (open) {
       loadDockIcons();
     } else {
-      hideDockForm();
+      // 编辑态由 Esc / 提交 / 再次点 + 关闭，收回动画不得拆掉输入框
       resetMagnifyState();
     }
+  }
+
+
+  /** 图标开始出现时就用当前指针位置启动放大，和出现动画一起走 */
+  function armMagnifyFromPointer() {
+    if (dragState || editCatch || dockWrap.classList.contains("editing")) return;
+    if (pTarget < 1 || pNow <= 0) return;
+    if (pointerX === null || !pointerNearDock(pointerX, pointerY)) return;
+    magTargetX = pointerX;
+    magTargetY = pointerY;
+    magFadeTarget = 1;
   }
 
   function startDockTick() {
@@ -716,33 +1095,61 @@
    * 一个循环同时推进三样东西：接近度、放大中心、横线状态。
    * 鼠标停下后会自己收敛、停表，不会空转。
    */
-  function dockTick() {
+  function dockTick(ts) {
     dockTickRaf = 0;
     var moving = false;
 
+    var dt = (ts - lastTickTs) / 1000;
+    lastTickTs = ts;
+    if (!(dt > 0)) dt = 1 / 60;
+    else if (dt > 1 / 60) dt = 1 / 60; // 掉帧时宁可慢一点，也不放大成一次跳跃
+
     if (REDUCE_MOTION) {
-      pNow = pTarget;
+      advanceReveal(ts);
+      advanceSink(ts);
+      armMagnifyFromPointer();
       magX = magTargetX;
       magY = magTargetY;
+      advanceMagFade(ts);
       layoutDock();
-      liftNow = liftTarget;
-      dockWrap.style.setProperty("--lift", liftNow.toFixed(3));
       return;
     }
 
-    var dp = pTarget - pNow;
-    if (Math.abs(dp) > 0.0006) {
-      pNow += dp * P_DAMP;
-      moving = true;
-    } else {
-      pNow = pTarget;
-    }
+    if (advanceReveal(ts)) moving = true;
+    if (advanceSink(ts)) moving = true;
 
-    if (magTargetX === null) {
-      if (magX !== null) {
-        magX = null;
-        magY = null;
+    // 展开到位后，鼠标即使停在横线上也要开始放大，不用再等一次 pointermove
+    armMagnifyFromPointer();
+
+    if (editCatch) {
+      var ct = (ts - editCatch.t0) / EDIT_CATCH_MS;
+      if (ct >= 1) {
+        magX = editCatch.toX;
+        magY = editCatch.toY;
+        magFade = editCatch.toFade;
+        editCatch = null;
         moving = true;
+      } else {
+        if (ct < 0) ct = 0;
+        var ck = easeOutCubic(ct);
+        var fx = editCatch.fromX;
+        var fy = editCatch.fromY;
+        var tx = editCatch.toX;
+        var ty = editCatch.toY;
+        magX = fx == null ? tx : (tx == null ? fx : fx + (tx - fx) * ck);
+        magY = fy == null ? ty : (ty == null ? fy : fy + (ty - fy) * ck);
+        magFade = editCatch.fromFade + (editCatch.toFade - editCatch.fromFade) * ck;
+        moving = true;
+      }
+    } else if (magTargetX === null) {
+      // 指针已经离开：不再清空放大中心，只让强度慢慢退回，
+      // 图标从当前大小/位置平滑落回，不会一帧之内“啪”地归位
+      if (magFade <= 0.0005) {
+        if (magX !== null || magY !== null) {
+          magX = null;
+          magY = null;
+          moving = true;
+        }
       }
     } else if (magX === null) {
       magX = magTargetX;
@@ -761,31 +1168,24 @@
       }
     }
 
-    layoutDock();
+    if (!editCatch && advanceMagFade(ts)) moving = true;
 
-    // 抬起量也要阻尼：放大让位时慢慢抬起，鼠标移开后慢慢落回
-    var dl = liftTarget - liftNow;
-    if (Math.abs(dl) > 0.002) {
-      liftNow += dl * LIFT_DAMP;
-      moving = true;
-    } else {
-      liftNow = liftTarget;
-    }
-    dockWrap.style.setProperty("--lift", liftNow.toFixed(3));
+    layoutDock();
 
     if (moving) dockTickRaf = requestAnimationFrame(dockTick);
   }
 
   /**
-   * 每帧按“接近程度 + 鼠标位置”重排 dock：
-   *   1. 接近程度 e 决定图标从横线里长出多少：缩放从 0 到 1、整排从中心向两侧铺开；
-   *   2. 鼠标位置决定每个图标放大多少，放大后的图标把邻居推开，左右距离随之变化；
-   *   3. “+”（dock-add）和普通图标走同一套计算，一起出现、一起被放大/让位。
+   * 每帧按“展开进度 + 鼠标位置”重排 dock：
+   *   1. 展开是开关：靠近就收到 1、离开再收到 0，不按距离连续缩放图标；
+   *   2. 收回只用上移和淡出（CSS --reveal），缩放始终不小于 1，避免压扁成点；
+   *   3. 图标一开始出现，就按鼠标位置做 macOS 式放大和左右让位。
    * 只改 transform，不动布局；offsetLeft/offsetWidth 永远是干净的静止值。
    */
   function layoutDock() {
-    var e = smoothstep(clamp01((pNow - ICON_FROM) / (1 - ICON_FROM)));
-    var sunk = sink(pNow);
+    var e = clamp01(pNow);
+    var fullyOpen = e >= 0.995;
+    var sunk = sinkNow;
 
     dockWrap.style.setProperty("--sink", sunk.toFixed(3));
     dockWrap.style.setProperty("--reveal", e.toFixed(3));
@@ -793,10 +1193,10 @@
     dockWrap.classList.toggle("revealing", pNow > 0.0001 && pNow < 0.995);
 
     lineGrow = e;
-    // 点线展开时先钉住，避免 pNow 还没到阈值就把刚打开的 dock 又关回去
-    setDockOpen(pNow >= ICON_FROM || dockPinned);
+    // 编辑态钉住展开，避免收回动画把输入框拆掉
+    setDockOpen(pNow > 0.001 || dockPinned || dockWrap.classList.contains("editing"));
 
-    // 拖动时图标位置由拖动逻辑接管；编辑时 dock 本身隐藏
+    // 拖动时图标位置由拖动逻辑接管；编辑时钉住进入时的放大，不跟着鼠标跳
     if (dragState || dockWrap.classList.contains("editing")) {
       refreshLine();
       return;
@@ -815,7 +1215,7 @@
     var originX = wrapRect.left + (dockWrap.clientWidth - dock.offsetWidth) / 2;
     // 图标从横线里往上浮，算垂直距离时跟着它当前的高度走，鼠标才像真的在图标旁边
     var centerY = wrapRect.top + dock.offsetTop + dock.offsetHeight / 2 + 34 * (1 - e);
-    var mx = magX === null ? null : magX - originX;
+    var mx = (e > 0 && magX !== null) ? magX - originX : null;
     var dy = magY === null ? 0 : Math.max(0, Math.abs(magY - centerY) - dock.offsetHeight / 2);
 
     var rest = [];
@@ -827,50 +1227,130 @@
     }
     restTotal += dockGap * (count - 1);
 
-    // 任何时刻「图标排的外宽」和横线一致：刚冒头时先从线的基本长度开始，
-    // 图标一边长大一边把整排撑到最终宽度，余量均匀分给图标间距。
+    // 横线长度跟着当前放大后的整排走：指针在中间时两侧都放大、线最长；
+    // 挪到边上时只有一侧放大，线跟着收短；平时（鼠标不在附近）只跟展开度走。
     var center = dock.offsetWidth / 2;
     var baseSpan = Math.max(44, Math.min(LINE_BASE, restTotal));
-    var span = baseSpan + (restTotal - baseSpan) * e;
+    var growSpan = baseSpan + (restTotal - baseSpan) * e;
     var grow = [];
     var natural = 0;
 
     for (var b = 0; b < count; b++) {
-      // 用按比例铺开后的槽位中心算放大，鼠标在左/右时近的一侧先变大
-      var slotCenter = center + (rest[b].center - center) * (span / restTotal);
+      // 槽位中心按「当前展开宽」铺开，不用最长线宽，放大中心不会跟着外扩
+      var slotCenter = center + (rest[b].center - center) * (growSpan / restTotal);
       var k = 1;
       if (mx !== null) {
         var dist = mx - slotCenter;
-        k = 1 + (MAG_MAX - 1) * Math.exp(-(dist * dist + dy * dy) / (2 * MAG_SIGMA * MAG_SIGMA));
+        // magFade 让放大强度独立于鼠标位置慢慢退回：指针快速甩开后，
+        // 图标仍从当前大小平滑缩回原状，邻居也随之缓缓让回
+        k = 1 + (MAG_MAX - 1) * Math.exp(-(dist * dist + dy * dy) / (2 * MAG_SIGMA * MAG_SIGMA)) * magFade;
       }
       grow.push(k);
-      natural += rest[b].width * e * k;
+      // 占位按完整图标宽度，不用展开度去缩小，避免图标被压扁
+      natural += rest[b].width * k;
     }
 
-    // 图标总宽超过线长时把线撑开，避免挤成一团；否则把余量均匀分给间距
-    if (count > 1) {
-      span = Math.max(span, natural + dockGap * (count - 1));
-    } else {
-      span = Math.max(span, natural);
-    }
-    refreshLine(span);
+    // 两端各留 LINE_PAD：线刚好包住放大后的整排，图标不贴线端
+    var minGap = dockGap * (count - 1);
+    var openSpan = natural + minGap + LINE_PAD * 2;
+    var lineSpan = baseSpan + (Math.max(openSpan, growSpan) - baseSpan) * e;
+    refreshLine(lineSpan);
 
-    var gap = count > 1 ? (span - natural) / (count - 1) : 0;
-    var x = center - span / 2;
+    // 完全展开后才做宽度保护；展开过程中线可以短于图标，由上移和淡出来过渡
+    var avail = lineSpan - minGap - LINE_PAD * 2;
+    if (fullyOpen && natural > avail && natural > 0.001) {
+      var fit = avail / natural;
+      for (var b2 = 0; b2 < count; b2++) grow[b2] *= fit;
+      natural *= fit;
+    }
+
+    // 图标排按自身宽度居中、间距恒定 6px；缩放只用于悬停放大，最低为 1
+    var rowSpan = natural + minGap;
+    var x = center - rowSpan / 2;
     for (var c = 0; c < count; c++) {
-      var scale = e * grow[c];
+      var scale = grow[c] < 1 ? 1 : grow[c];
       var tx = x + (rest[c].width * scale) / 2 - rest[c].center;
       entries[c].style.transform = "translateX(" + tx.toFixed(2) + "px) scale(" + scale.toFixed(3) + ")";
       entries[c].style.zIndex = grow[c] > 1.06 ? "3" : "";
-      x += rest[c].width * scale + gap;
+      x += rest[c].width * scale + dockGap;
     }
+  }
 
-    liftTarget = e > 0.85 && span > restTotal + 0.5 ? 1 : 0;
-    dockWrap.style.setProperty("--lift", liftNow.toFixed(3));
+  function easeOutProgress(from, to, t0, ts, duration) {
+    var span = Math.abs(to - from);
+    var dur = duration * (span > 0.001 ? span : 1);
+    var t = (ts - t0) / dur;
+    if (t >= 1) return to;
+    if (t < 0) t = 0;
+    return from + (to - from) * easeOutCubic(t);
+  }
+
+  /** 图标出现/收回：从当前位置用 1-(1-t)^3 走到目标，中途反向则就地转 */
+  function advanceReveal(ts) {
+    var want = pTarget > 0 ? 1 : 0;
+    if (REDUCE_MOTION) {
+      if (pNow === want && pAnimTo === want) return false;
+      pNow = pFrom = pAnimTo = want;
+      return true;
+    }
+    if (want !== pAnimTo) {
+      pFrom = pNow;
+      pAnimTo = want;
+      pT0 = ts;
+    }
+    if (pNow === pAnimTo) return false;
+    pNow = easeOutProgress(pFrom, pAnimTo, pT0, ts, REVEAL_MS);
+    return true;
+  }
+
+  /** 放大强度同样用递减凸函数，进入和回落都从当前位置接着走 */
+  function advanceMagFade(ts) {
+    var want = magFadeTarget;
+    if (REDUCE_MOTION) {
+      if (magFade === want && magFadeTo === want) return false;
+      magFade = magFadeFrom = magFadeTo = want;
+      return true;
+    }
+    if (want !== magFadeTo) {
+      magFadeFrom = magFade;
+      magFadeTo = want;
+      magFadeT0 = ts;
+    }
+    if (Math.abs(magFade - magFadeTo) <= 0.0005) {
+      magFade = magFadeTo;
+      return false;
+    }
+    var ms = magFadeTo > magFadeFrom ? MAG_IN_MS : MAG_OUT_MS;
+    magFade = easeOutProgress(magFadeFrom, magFadeTo, magFadeT0, ts, ms);
+    return true;
   }
 
   /** 鼠标离横线上下 160px 内、左右端点外 160px 内都算“接近” */
+  /** 横线上下移动：从当前位置用 1-(1-t)^3 走到目标，中途反向则就地转 */
+  function advanceSink(ts) {
+    var want = pTarget > 0 ? 1 : 0;
+    if (REDUCE_MOTION) {
+      if (sinkNow === want && sinkTo === want) return false;
+      sinkNow = sinkFrom = sinkTo = want;
+      return true;
+    }
+    if (want !== sinkTo) {
+      sinkFrom = sinkNow;
+      sinkTo = want;
+      sinkT0 = ts;
+    }
+    if (sinkNow === sinkTo) return false;
+    sinkNow = easeOutProgress(sinkFrom, sinkTo, sinkT0, ts, SINK_MS);
+    return true;
+  }
+
   function proximityAt(x, y) {
+    // 从正上方点搜索框时，指针会先经过搜索框上方的感应区；
+    // 搜索框及其正上方都不展开，只有到搜索框下方靠近横线才响应
+    if (form) {
+      var box = form.getBoundingClientRect();
+      if (y <= box.bottom && x >= box.left && x <= box.right) return 0;
+    }
     var rect = dockWrap.getBoundingClientRect();
     var top = rect.top + rect.height / 2;
     var bottom = top + 60;
@@ -881,20 +1361,40 @@
     return Math.max(0, 1 - distance / REVEAL_RADIUS);
   }
 
-  /** 展开程度 → 横线下沉量（0~1），比靠得最近的那一下更早沉到底 */
-  function sink(progress) {
-    return Math.min(1, progress * SINK_GAIN);
-  }
-
   function updateProximity() {
     proximityRaf = 0;
 
-    if (dragState || dockPinned || dockWrap.classList.contains("editing")) {
+    if (dragState || isDockHeld()) {
+      cancelRevealDwell();
       applyReveal(1);
       return;
     }
     if (pointerX === null) return;
-    applyReveal(proximityAt(pointerX, pointerY));
+    var near = proximityAt(pointerX, pointerY) > 0;
+    // 已经要展开或已经展开：在区内移动立刻保持，不用再等
+    if (near && pTarget > 0) {
+      cancelRevealDwell();
+      applyReveal(1);
+      return;
+    }
+    if (near) {
+      if (!revealEnterAt) revealEnterAt = performance.now();
+      var waited = performance.now() - revealEnterAt;
+      if (waited >= REVEAL_DWELL_MS) {
+        cancelRevealDwell();
+        applyReveal(1);
+        return;
+      }
+      if (!revealDwellTimer) {
+        revealDwellTimer = setTimeout(function () {
+          revealDwellTimer = 0;
+          scheduleProximity();
+        }, REVEAL_DWELL_MS - waited);
+      }
+      return;
+    }
+    cancelRevealDwell();
+    applyReveal(0);
   }
 
   function scheduleProximity() {
@@ -903,6 +1403,17 @@
   }
 
   function showDockForm() {
+    cancelRetract();
+    pTarget = 1;
+    setDockOpen(true);
+    editCatch = null;
+    editMagX = magX;
+    editMagY = magY;
+    editMagFade = magFade;
+    magTargetX = magX;
+    magTargetY = magY;
+    magFadeTarget = magFade;
+    startDockTick();
     dockWrap.classList.add("editing");
     dockAdd.setAttribute("aria-expanded", "true");
     resetDockNote();
@@ -914,6 +1425,50 @@
     dockWrap.classList.remove("editing");
     dockAdd.setAttribute("aria-expanded", "false");
     resetDockNote();
+    if (dockWrap.contains(document.activeElement)) document.activeElement.blur();
+    // 图标还停在点 + 时的放大，用 1-(1-t)^3 在 0.5 秒内追到现在的指针
+    magX = editMagX;
+    magY = editMagY;
+    magFade = editMagFade;
+    var toX;
+    var toY;
+    var toFade;
+    if (pointerX !== null && pointerNearDock(pointerX, pointerY) && pNow >= 0.995) {
+      if (magX === null) {
+        magX = pointerX;
+        magY = pointerY;
+      }
+      toX = pointerX;
+      toY = pointerY;
+      toFade = 1;
+      magTargetX = pointerX;
+      magTargetY = pointerY;
+      magFadeTarget = 1;
+    } else {
+      toX = magX;
+      toY = magY;
+      toFade = 0;
+      magTargetX = null;
+      magTargetY = null;
+      magFadeTarget = 0;
+    }
+    if (REDUCE_MOTION) {
+      magX = toX;
+      magY = toY;
+      magFade = toFade;
+      editCatch = null;
+    } else {
+      editCatch = {
+        t0: performance.now(),
+        fromX: magX,
+        fromY: magY,
+        fromFade: magFade,
+        toX: toX,
+        toY: toY,
+        toFade: toFade
+      };
+    }
+    startDockTick();
   }
 
   function resetDockNote() {
@@ -1060,38 +1615,62 @@
 
   dockWrap.addEventListener("focusout", function (e) {
     if (dockWrap.contains(e.relatedTarget)) return;
-    if (dockPinned) return;
+    if (isDockHeld()) return;
     if (pointerX === null) applyReveal(0);
-    else applyReveal(proximityAt(pointerX, pointerY));
+    else applyReveal(proximityAt(pointerX, pointerY) > 0 ? 1 : 0);
   });
 
-  document.addEventListener("pointermove", function (e) {
-    if (e.pointerType === "touch") return;
+  /** 入场结束前忽略指针位置；结束后还要再真正移动过，才按接近度展开 */
+  function trackHoverPointer(e) {
+    if (e.pointerType === "touch") return false;
+    if (!pointerArmed) {
+      if (armX === null || !entranceDone) {
+        armX = e.clientX;
+        armY = e.clientY;
+        return false;
+      }
+      var dx = e.clientX - armX;
+      var dy = e.clientY - armY;
+      if (dx * dx + dy * dy < ARM_MOVE * ARM_MOVE) return false;
+      pointerArmed = true;
+    }
     pointerX = e.clientX;
     pointerY = e.clientY;
+    return true;
+  }
+
+  document.addEventListener("pointermove", function (e) {
+    if (!trackHoverPointer(e)) return;
     scheduleProximity();
   });
 
   document.documentElement.addEventListener("pointerleave", function () {
     pointerX = null;
-    resetMagnifyState();
+    fadeOutMagnify();
     startDockTick();
-    if (dockPinned || dockWrap.classList.contains("editing")) return;
+    if (isDockHeld()) return;
     applyReveal(0);
   });
 
   window.addEventListener("blur", function () {
-    resetMagnifyState();
+    fadeOutMagnify();
     startDockTick();
-    if (dockPinned || dockWrap.classList.contains("editing")) return;
+    if (isDockHeld()) return;
     applyReveal(0);
   });
 
   document.addEventListener("pointerdown", function (e) {
     if (dockWrap.contains(e.target)) return;
+    // 点搜索框不要误关；点旁边空白处只收起胶囊，横线保持当前状态
+    if (dockWrap.classList.contains("editing")) {
+      if (form && form.contains(e.target)) return;
+      pointerX = e.clientX;
+      pointerY = e.clientY;
+      hideDockForm();
+      return;
+    }
     dockPinned = false;
-    hideDockForm();
-    applyReveal(0);
+    applyRevealNow(0);
   });
 
   /* ---------- 放大 + 左右让位（类似 macOS Dock） ---------- */
@@ -1101,9 +1680,19 @@
     magTargetY = null;
     magX = null;
     magY = null;
-    liftNow = 0;
-    liftTarget = 0;
-    dockWrap.style.setProperty("--lift", "0");
+    magFade = 0;
+    magFadeTarget = 0;
+  }
+
+  /**
+   * 指针快速离开接近区/页面：不硬清放大中心，只把放大强度交给阻尼退回 0。
+   * 这样图标会从当前大小缓慢落回原位，而不是在离开那一帧突然弹回。
+   */
+  function fadeOutMagnify() {
+    if (magTargetX === null && magFadeTarget === 0) return;
+    magTargetX = null;
+    magTargetY = null;
+    magFadeTarget = 0;
   }
 
   function resetMagnify() {
@@ -1125,20 +1714,21 @@
     }
   }
 
-  // 放大和“接近”用同一个判定范围：横线刚开始沉、图标刚冒头时，
-  // 鼠标还在下方的接近区里，缩放就已经跟着鼠标位置走了
   function pointerNearDock(x, y) {
     return proximityAt(x, y) > 0;
   }
 
   // 鼠标位置只作为“放大的目标”，每帧由 dockTick 阻尼追上；
-  // dock 还没完全出现时也照样算，图标一冒头就是被鼠标顶大的样子
+  // 图标一开始出现就放大，和展开同步，不再等完全展开
   document.addEventListener("pointermove", function (e) {
-    if (e.pointerType === "touch" || dragState) return;
+    if (!trackHoverPointer(e) || dragState) return;
+    // 编辑时不更新放大目标，取消后由 hideDockForm 从钉住的状态平滑接上
+    if (dockWrap.classList.contains("editing") || editCatch) return;
 
-    if (!pointerNearDock(e.clientX, e.clientY)) {
-      if (magX !== null || magTargetX !== null) {
-        resetMagnifyState();
+    if (!pointerNearDock(e.clientX, e.clientY) || pTarget < 1 || pNow <= 0) {
+      // 快速甩出接近区：放大中心停在最后位置，强度交给阻尼慢慢退回
+      if (magTargetX !== null || magFadeTarget !== 0) {
+        fadeOutMagnify();
         startDockTick();
       }
       return;
@@ -1146,6 +1736,7 @@
 
     magTargetX = e.clientX;
     magTargetY = e.clientY;
+    magFadeTarget = 1;
     startDockTick();
   });
 
@@ -1165,7 +1756,7 @@
     } else {
       if (dockWrap.contains(document.activeElement)) document.activeElement.blur();
       dockPinned = false;
-      applyReveal(0);
+      applyRevealNow(0);
     }
   });
 
@@ -1196,7 +1787,7 @@
   // 扩展环境：启动后从 chrome.storage 拉一次，关掉浏览器也不会丢
   if (extStore) {
     try {
-      extStore.get([DOCK_KEY, STORE_KEY], function (data) {
+      extStore.get([DOCK_KEY, STORE_KEY, ICON_CACHE_KEY], function (data) {
         if (!data) return;
 
         if (!Array.isArray(data[DOCK_KEY]) && sites.length) {
@@ -1207,6 +1798,20 @@
           if (clean.join("\n") !== sites.join("\n")) {
             sites = clean;
             renderDock();
+          }
+        }
+
+        // localStorage 被清过时，图标缓存还能从扩展存储里捞回来
+        if (data[ICON_CACHE_KEY] && typeof data[ICON_CACHE_KEY] === "object") {
+          var stored = data[ICON_CACHE_KEY];
+          var merged = false;
+          for (var host in stored) {
+            if (!Object.prototype.hasOwnProperty.call(stored, host)) continue;
+            if (!iconCache[host]) { iconCache[host] = stored[host]; merged = true; }
+          }
+          if (merged) {
+            writeIconCache();
+            loadDockIcons();
           }
         }
 
